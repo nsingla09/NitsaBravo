@@ -1,0 +1,137 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Fields:
+    //   - uid: string (required)
+    //   - email: string (required)
+    //   - displayName: string (required)
+    //   - photoURL: string
+    //   - pointsBalance: number (required)
+    //   - role: string (optional, default: 'user')
+    //
+    // Collection: transactions
+    // Fields:
+    //   - fromUid: string (required)
+    //   - fromName: string (required)
+    //   - toUid: string (required)
+    //   - toName: string (required)
+    //   - points: number (required)
+    //   - reason: string (required)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: employees
+    // Fields:
+    //   - employeeCode: string (required)
+    //   - name: string (required)
+    //   - target: number (required)
+    //   - position: string (required)
+    //   - status: string (Active/Deactive)
+    //   ...
+    //
+    // Collection: weeks
+    // Fields:
+    //   - weekName: string (required)
+    //   - startDate: string (required)
+    //   - endDate: string (required)
+    //   - month: string (required)
+    //
+    // Collection: bdes
+    // Fields:
+    //   - name: string (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        (request.auth.token.email == "nsingla09@gmail.com" && request.auth.token.email_verified == true) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'user') == 'admin')
+      );
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return data.uid is string && 
+             data.email is string && isValidEmail(data.email) &&
+             data.displayName is string && data.displayName.size() > 0 &&
+             data.pointsBalance is number;
+    }
+
+    function isValidTransaction(data) {
+      return data.fromUid is string &&
+             data.fromName is string &&
+             data.toUid is string &&
+             data.toName is string &&
+             data.points is number && data.points > 0 &&
+             data.reason is string && data.reason.size() > 0;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isAuthenticated() && (
+        (isOwner(userId) && isValidUser(request.resource.data) && 
+         request.resource.data.get('role', resource.data.get('role', 'user')) == resource.data.get('role', 'user')) ||
+        isAdmin()
+      );
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidTransaction(request.resource.data) && 
+                    request.resource.data.fromUid == request.auth.uid;
+    }
+
+    match /employees/{employeeId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /weeks/{weekId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /bdes/{bdeId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /sales/{saleId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /test/connection {
+      allow read: if true;
+    }
+  }
+}

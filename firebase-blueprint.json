@@ -1,0 +1,137 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and points balance",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "The unique identifier for the user" },
+        "email": { "type": "string", "format": "email", "description": "The user's email address" },
+        "displayName": { "type": "string", "description": "The user's display name" },
+        "photoURL": { "type": "string", "description": "The user's photo URL" },
+        "pointsBalance": { "type": "number", "description": "The current balance of Bravo points" }
+      },
+      "required": ["uid", "email", "displayName", "pointsBalance"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "A record of Bravo points awarded",
+      "type": "object",
+      "properties": {
+        "fromUid": { "type": "string", "description": "The UID of the user awarding the points" },
+        "fromName": { "type": "string", "description": "The name of the user awarding the points" },
+        "toUid": { "type": "string", "description": "The UID of the user receiving the points" },
+        "toName": { "type": "string", "description": "The name of the user receiving the points" },
+        "points": { "type": "number", "description": "The number of points awarded" },
+        "reason": { "type": "string", "description": "The reason for the award" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the transaction occurred" }
+      },
+      "required": ["fromUid", "fromName", "toUid", "toName", "points", "reason", "createdAt"]
+    },
+    "Employee": {
+      "title": "Employee",
+      "description": "Employee master record",
+      "type": "object",
+      "properties": {
+        "employeeCode": { "type": "string", "description": "Auto-generated employee code" },
+        "name": { "type": "string", "description": "Employee name" },
+        "target": { "type": "number", "description": "Target amount" },
+        "position": { "type": "string", "description": "Employee position" },
+        "joiningDate": { "type": "string", "format": "date", "description": "Joining date" },
+        "joiningWeek": { "type": "string", "description": "Joining week" },
+        "bde": { "type": "string", "description": "Business Development Executive" },
+        "status": { "type": "string", "enum": ["Active", "Deactive"], "description": "Active or Deactive status" },
+        "week1Target": { "type": "number", "description": "1st week target percentage" },
+        "week2Target": { "type": "number", "description": "2nd week target percentage" },
+        "week3Target": { "type": "number", "description": "3rd week target percentage" },
+        "week4Target": { "type": "number", "description": "4th week target percentage" },
+        "week5Target": { "type": "number", "description": "5th week target percentage" },
+        "week6Target": { "type": "number", "description": "6th week target percentage" }
+      },
+      "required": ["employeeCode", "name", "target", "position", "joiningDate", "status"]
+    },
+    "Week": {
+      "title": "Week",
+      "description": "Week master record defining date ranges",
+      "type": "object",
+      "properties": {
+        "weekName": { "type": "string", "description": "Name of the week (e.g., Week 1)" },
+        "startDate": { "type": "string", "format": "date", "description": "Start date of the week" },
+        "endDate": { "type": "string", "format": "date", "description": "End date of the week" },
+        "month": { "type": "string", "description": "Month and year (e.g., March 2026)" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the week was created" }
+      },
+      "required": ["weekName", "startDate", "endDate", "month"]
+    },
+    "BDE": {
+      "title": "BDE",
+      "description": "Business Development Executive master record",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "BDE name" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the BDE was created" }
+      },
+      "required": ["name"]
+    },
+    "Sales": {
+      "title": "Sales",
+      "description": "Sales master record",
+      "type": "object",
+      "properties": {
+        "week": { "type": "string", "description": "Week range" },
+        "date": { "type": "string", "format": "date", "description": "Sale date" },
+        "guestName": { "type": "string", "description": "Name of the guest" },
+        "agent": { "type": "string", "description": "Agent name" },
+        "bde": { "type": "string", "description": "BDE name" },
+        "associateBde": { "type": "string", "description": "Associate BDE name" },
+        "percentage": { "type": "string", "description": "Percentage" },
+        "destination": { "type": "string", "description": "Destination" },
+        "tripId": { "type": "string", "description": "Trip ID" },
+        "tripDate": { "type": "string", "format": "date", "description": "Trip date" },
+        "packageValue": { "type": "number", "description": "Package value" },
+        "lessThan10Percent20k": { "type": "string", "description": "Less than 10% / 20k" },
+        "ppMargin": { "type": "number", "description": "PP Margin" },
+        "noOfPax": { "type": "number", "description": "Number of Pax" },
+        "totalMargin": { "type": "number", "description": "Total Margin" },
+        "flight": { "type": "number", "description": "Flight cost" },
+        "source": { "type": "string", "description": "Source" },
+        "converted": { "type": "string", "description": "Converted status" },
+        "tasksPending": { "type": "string", "description": "Tasks pending" },
+        "pHotel": { "type": "string", "description": "P - Hotel" },
+        "pFlight": { "type": "string", "description": "P Flight" },
+        "land": { "type": "string", "description": "Land status" },
+        "hflIssue": { "type": "string", "description": "H+F+L issue" },
+        "workPending": { "type": "string", "description": "Work pending" },
+        "remarks": { "type": "string", "description": "Remarks" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the record was created" }
+      },
+      "required": ["week", "date", "guestName", "agent", "destination", "tripId", "packageValue"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "Bravo point transactions"
+    },
+    "/employees/{employeeId}": {
+      "schema": "Employee",
+      "description": "Employee master records"
+    },
+    "/weeks/{weekId}": {
+      "schema": "Week",
+      "description": "Week master records"
+    },
+    "/bdes/{bdeId}": {
+      "schema": "BDE",
+      "description": "BDE master records"
+    },
+    "/sales/{saleId}": {
+      "schema": "Sales",
+      "description": "Sales master records"
+    }
+  }
+}
