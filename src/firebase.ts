@@ -1,15 +1,17 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, orderBy, limit, onSnapshot, addDoc, serverTimestamp, runTransaction, getDocFromServer } from 'firebase/firestore';
+import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, getDocs, orderBy, limit, onSnapshot, addDoc, serverTimestamp, runTransaction, getDocFromServer, or, and } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
 // Initialize Firebase SDK
 console.log('Initializing Firebase with config:', firebaseConfig);
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app); // Use the default database
-console.log('Firestore initialized with default database');
+export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId); // Use the named database
+console.log('Firestore initialized with database:', firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
+
+export { or, and };
 
 // Error handling helper
 export enum OperationType {
@@ -86,6 +88,8 @@ export {
   deleteDoc,
   collection, 
   query, 
+  where,
+  getDocs,
   orderBy, 
   limit, 
   onSnapshot, 

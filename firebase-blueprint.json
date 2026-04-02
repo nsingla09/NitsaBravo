@@ -41,14 +41,17 @@
         "joiningWeek": { "type": "string", "description": "Joining week" },
         "bde": { "type": "string", "description": "Business Development Executive" },
         "status": { "type": "string", "enum": ["Active", "Deactive"], "description": "Active or Deactive status" },
+        "isAssocBDE": { "type": "boolean", "description": "If true, employee acts as Associate BDE" },
         "week1Target": { "type": "number", "description": "1st week target percentage" },
         "week2Target": { "type": "number", "description": "2nd week target percentage" },
         "week3Target": { "type": "number", "description": "3rd week target percentage" },
         "week4Target": { "type": "number", "description": "4th week target percentage" },
         "week5Target": { "type": "number", "description": "5th week target percentage" },
-        "week6Target": { "type": "number", "description": "6th week target percentage" }
+        "week6Target": { "type": "number", "description": "6th week target percentage" },
+        "salary": { "type": "number", "description": "Monthly salary of the employee" },
+        "completedTrainings": { "type": "array", "items": { "type": "string" }, "description": "Array of completed training material IDs" }
       },
-      "required": ["employeeCode", "name", "target", "position", "joiningDate", "status"]
+      "required": ["employeeCode", "name", "target", "position", "joiningDate", "status", "salary"]
     },
     "Week": {
       "title": "Week",
@@ -82,9 +85,11 @@
         "date": { "type": "string", "format": "date", "description": "Sale date" },
         "guestName": { "type": "string", "description": "Name of the guest" },
         "agent": { "type": "string", "description": "Agent name" },
+        "agentEmail": { "type": "string", "format": "email", "description": "Agent email" },
+        "agentPercentage": { "type": "number", "description": "Percentage for Agent" },
         "bde": { "type": "string", "description": "BDE name" },
         "associateBde": { "type": "string", "description": "Associate BDE name" },
-        "percentage": { "type": "string", "description": "Percentage" },
+        "assocBdePercentage": { "type": "number", "description": "Percentage for Associate BDE" },
         "destination": { "type": "string", "description": "Destination" },
         "tripId": { "type": "string", "description": "Trip ID" },
         "tripDate": { "type": "string", "format": "date", "description": "Trip date" },
@@ -106,12 +111,48 @@
         "createdAt": { "type": "string", "format": "date-time", "description": "When the record was created" }
       },
       "required": ["week", "date", "guestName", "agent", "destination", "tripId", "packageValue"]
+    },
+    "TrainingMaterial": {
+      "title": "TrainingMaterial",
+      "description": "Training material master record",
+      "type": "object",
+      "properties": {
+        "remarks": { "type": "string", "description": "Remarks" },
+        "module": { 
+          "type": "array", 
+          "items": { "type": "string", "enum": ["Sales", "Operations", "Lead"] },
+          "description": "Module types" 
+        },
+        "points": { "type": "number", "description": "Points (1-10)" },
+        "day": { "type": "number", "description": "Day (1-15)" },
+        "time": { "type": "number", "description": "Time in minutes" },
+        "isActive": { "type": "boolean", "description": "Active status" },
+        "link": { "type": "string", "description": "Link to training material" },
+        "priority": { "type": "number", "description": "Priority for sorting" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When created" }
+      },
+      "required": ["remarks", "module", "points", "day", "time", "isActive"]
+    },
+    "Role": {
+      "title": "Role",
+      "description": "User role and associated permissions",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "The name of the role (e.g., Admin, Manager)" },
+        "permissions": { "type": "array", "items": { "type": "string" }, "description": "List of permission IDs" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the role was created" }
+      },
+      "required": ["name", "permissions"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "User",
       "description": "User profiles"
+    },
+    "/roles/{roleId}": {
+      "schema": "Role",
+      "description": "User roles and permissions"
     },
     "/transactions/{transactionId}": {
       "schema": "Transaction",
@@ -132,6 +173,10 @@
     "/sales/{saleId}": {
       "schema": "Sales",
       "description": "Sales master records"
+    },
+    "/trainingMaterials/{trainingId}": {
+      "schema": "TrainingMaterial",
+      "description": "Training material master records"
     }
   }
 }

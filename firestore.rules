@@ -31,6 +31,7 @@ service cloud.firestore {
     //   - target: number (required)
     //   - position: string (required)
     //   - status: string (Active/Deactive)
+    //   - completedTrainings: list (optional)
     //   ...
     //
     // Collection: weeks
@@ -40,11 +41,21 @@ service cloud.firestore {
     //   - endDate: string (required)
     //   - month: string (required)
     //
-    // Collection: bdes
+    // Collection: sales
     // Fields:
-    //   - name: string (required)
-    //
-    // ===============================================================
+    //   - week: string (required)
+    //   - date: string (required)
+    //   - guestName: string (required)
+    //   - agent: string (required)
+    //   - agentEmail: string (optional)
+    //   - agentPercentage: number (required)
+    //   - bde: string (required)
+    //   - associateBde: string (required)
+    //   - assocBdePercentage: number (required)
+    //   - destination: string (required)
+    //   - tripId: string (required)
+    //   - packageValue: number (required)
+    //   ...
 
     // ===============================================================
     // Helper Functions
@@ -62,7 +73,35 @@ service cloud.firestore {
       return isAuthenticated() && (
         (request.auth.token.email == "nsingla09@gmail.com" && request.auth.token.email_verified == true) ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'user') == 'admin')
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent') is string &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent').lower() == 'admin')
+      );
+    }
+
+    function isManager() {
+      return isAuthenticated() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent') is string &&
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent').lower() == 'manager';
+    }
+
+    function isTrainer() {
+      return isAuthenticated() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent') is string &&
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent').lower() == 'trainer';
+    }
+
+    function isPrivileged() {
+      return isAdmin() || isManager() || isTrainer() || hasPermission('trainingOverview');
+    }
+
+    function hasPermission(permission) {
+      return isAdmin() || (permission == 'trainingOverview' && (isManager() || isTrainer())) || (
+        isAuthenticated() && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', []) is list &&
+        permission in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', [])
       );
     }
 
@@ -82,7 +121,17 @@ service cloud.firestore {
       return data.uid is string && 
              data.email is string && isValidEmail(data.email) &&
              data.displayName is string && data.displayName.size() > 0 &&
-             data.pointsBalance is number;
+             data.pointsBalance is number &&
+             data.role is string &&
+             data.permissions is list &&
+             (!('updatedAt' in data) || data.updatedAt is timestamp) &&
+             (!('createdAt' in data) || data.createdAt is timestamp) &&
+             (!('photoURL' in data) || data.photoURL is string);
+    }
+
+    function isValidRole(data) {
+      return data.name is string && data.name.size() > 0 &&
+             data.permissions is list;
     }
 
     function isValidTransaction(data) {
@@ -94,40 +143,87 @@ service cloud.firestore {
              data.reason is string && data.reason.size() > 0;
     }
 
+    function isValidTrainingMaterial(data) {
+      return data.remarks is string && data.remarks.size() > 0 && data.remarks.size() < 1000 &&
+             (data.module is list || data.module is string) &&
+             data.points is number && data.points >= 1 && data.points <= 10 &&
+             data.day is number && data.day >= 1 && data.day <= 15 &&
+             data.time is number && data.time in [15, 30, 45, 60, 90, 120] &&
+             (!('isActive' in data) || data.isActive is bool) &&
+             (!('link' in data) || (data.link is string && data.link.size() < 2000)) &&
+             (!('priority' in data) || data.priority is number);
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
 
+    match /roles/{roleId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin() && isValidRole(request.resource.data);
+    }
+
     match /users/{userId} {
       allow read: if isAuthenticated();
-      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow create: if (isOwner(userId) || isAdmin()) && isValidUser(request.resource.data);
       allow update: if isAuthenticated() && (
         (isOwner(userId) && isValidUser(request.resource.data) && 
          request.resource.data.get('role', resource.data.get('role', 'user')) == resource.data.get('role', 'user')) ||
-        isAdmin()
+        (isAdmin() && isValidUser(request.resource.data)) ||
+        (isAdmin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'role', 'permissions', 'updatedAt', 'photoURL', 'displayName', 
+          'email', 'uid', 'createdAt', 'lastLoginAt', 'status', 
+          'department', 'title', 'managerId', 'pointsBalance'
+        ]))
       );
     }
 
     match /transactions/{transactionId} {
-      allow read: if isAuthenticated();
+      allow read: if isAuthenticated() && (
+        isPrivileged() || 
+        resource.data.fromUid == request.auth.uid || 
+        resource.data.toUid == request.auth.uid
+      );
       allow create: if isAuthenticated() && isValidTransaction(request.resource.data) && 
                     request.resource.data.fromUid == request.auth.uid;
     }
 
+    match /trainingMaterials/{trainingId} {
+      allow read: if isAuthenticated();
+      allow create, update: if hasPermission('training') && isValidTrainingMaterial(request.resource.data);
+      allow delete: if hasPermission('training');
+    }
+
     match /employees/{employeeId} {
-      allow read, write: if isAdmin();
+      allow read: if isAuthenticated() && (
+        isPrivileged() || 
+        resource.data.get('email', '') == request.auth.token.email
+      );
+      allow write: if isPrivileged();
     }
 
     match /weeks/{weekId} {
-      allow read, write: if isAdmin();
+      allow read: if isAuthenticated();
+      allow write: if isPrivileged();
     }
 
     match /bdes/{bdeId} {
-      allow read, write: if isAdmin();
+      allow read: if isAuthenticated();
+      allow write: if isPrivileged();
     }
 
     match /sales/{saleId} {
-      allow read, write: if isAdmin();
+      allow read: if isAuthenticated() && (
+        isPrivileged() || 
+        resource.data.get('agentEmail', '') == request.auth.token.email ||
+        resource.data.get('agent', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.displayName
+      );
+      allow create: if isAuthenticated() && (
+        isPrivileged() || 
+        (request.resource.data.get('agentEmail', '') == request.auth.token.email ||
+         request.resource.data.get('agent', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.displayName)
+      );
+      allow update, delete: if isPrivileged();
     }
 
     match /test/connection {

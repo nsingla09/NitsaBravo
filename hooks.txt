@@ -1,0 +1,143 @@
+6:import { useState, useEffect, useMemo, Component, useRef } from 'react';
+153:  { id: 'userManagement', label: 'User Management' },
+328:  const [user, setUser] = useState<any>(null);
+329:  const [profile, setProfile] = useState<UserProfile | null>(null);
+330:  const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
+331:  const [roles, setRoles] = useState<Role[]>([]);
+332:  const [isRolesModalOpen, setIsRolesModalOpen] = useState(false);
+333:  const [selectedRole, setSelectedRole] = useState<Role | null>(null);
+334:  const [isRoleEditModalOpen, setIsRoleEditModalOpen] = useState(false);
+335:  const [transactions, setTransactions] = useState<Transaction[]>([]);
+336:  const [employees, setEmployees] = useState<Employee[]>([]);
+337:  const [weeks, setWeeks] = useState<Week[]>([]);
+338:  const [bdes, setBDES] = useState<BDE[]>([]);
+339:  const [sales, setSales] = useState<Sales[]>([]);
+340:  const [activeTab, setActiveTab] = useState<'dashboard' | 'employees' | 'weeks' | 'bdes' | 'sales' | 'weeklyOverview' | 'userManagement' | 'training'>('dashboard');
+341:  const [isLoading, setIsLoading] = useState(true);
+342:  const [isAwarding, setIsAwarding] = useState(false);
+343:  const [isSavingEmployee, setIsSavingEmployee] = useState(false);
+344:  const [isSavingWeek, setIsSavingWeek] = useState(false);
+345:  const [isSavingBDE, setIsSavingBDE] = useState(false);
+346:  const [isSavingSales, setIsSavingSales] = useState(false);
+347:  const [isSavingUser, setIsSavingUser] = useState(false);
+348:  const [isEditingEmployee, setIsEditingEmployee] = useState(false);
+349:  const [isEditingWeek, setIsEditingWeek] = useState(false);
+350:  const [isEditingBDE, setIsEditingBDE] = useState(false);
+351:  const [isEditingSales, setIsEditingSales] = useState(false);
+352:  const [isEditingUser, setIsEditingUser] = useState(false);
+353:  const [isEmployeeModalOpen, setIsEmployeeModalOpen] = useState(false);
+354:  const [isWeekModalOpen, setIsWeekModalOpen] = useState(false);
+355:  const [isBDEModalOpen, setIsBDEModalOpen] = useState(false);
+356:  const [isSalesModalOpen, setIsSalesModalOpen] = useState(false);
+357:  const [isUserModalOpen, setIsUserModalOpen] = useState(false);
+358:  const [isMenuOpen, setIsMenuOpen] = useState(false);
+359:  const menuRef = useRef<HTMLDivElement>(null);
+360:  const lastUserRef = useRef<any>(null);
+362:  useEffect(() => {
+363:    const handleClickOutside = (event: MouseEvent) => {
+369:    document.addEventListener('mousedown', handleClickOutside);
+371:      document.removeEventListener('mousedown', handleClickOutside);
+374:  const [searchQuery, setSearchQuery] = useState('');
+375:  const [employeeSearchQuery, setEmployeeSearchQuery] = useState('');
+376:  const [employeeStatusFilter, setEmployeeStatusFilter] = useState<'Active' | 'Deactive' | 'All'>('Active');
+377:  const [employeeAssocBdeFilter, setEmployeeAssocBdeFilter] = useState<'All' | 'Yes' | 'No'>('All');
+378:  const [salesAgentFilter, setSalesAgentFilter] = useState('');
+379:  const [salesBdeFilter, setSalesBdeFilter] = useState('');
+380:  const [salesWeekFilter, setSalesWeekFilter] = useState('');
+381:  const [salesMonthFilter, setSalesMonthFilter] = useState('');
+382:  const [hasSetDefaultWeek, setHasSetDefaultWeek] = useState(false);
+383:  const [hasSetDefaultMonth, setHasSetDefaultMonth] = useState(false);
+384:  const [selectedUser, setSelectedUser] = useState<UserProfile | null>(null);
+385:  const [pointsToAward, setPointsToAward] = useState(10);
+386:  const [reason, setReason] = useState('');
+387:  const [error, setError] = useState<string | null>(null);
+388:  const [success, setSuccess] = useState<string | null>(null);
+389:  const [fatalError, setFatalError] = useState<any>(null);
+390:  const [deleteConfirmation, setDeleteConfirmation] = useState<{
+392:    type: 'employee' | 'week' | 'bde' | 'sales' | 'user';
+395:  const unsubsRef = useRef<(() => void)[]>([]);
+409:  const [employeeForm, setEmployeeForm] = useState<Partial<Employee>>({
+424:  const [trainingMaterials, setTrainingMaterials] = useState<TrainingMaterial[]>([]);
+425:  const [trainingForm, setTrainingForm] = useState<Partial<TrainingMaterial>>({
+433:  const [isTrainingModalOpen, setIsTrainingModalOpen] = useState(false);
+435:  const [weekForm, setWeekForm] = useState<Partial<Week>>({
+440:  const [bdeForm, setBDEForm] = useState<Partial<BDE>>({
+444:  const [salesForm, setSalesForm] = useState<Partial<Sales>>({
+474:  const [userForm, setUserForm] = useState<Partial<UserProfile>>({
+487:  const filteredEmployees = useMemo(() => {
+512:  useEffect(() => {
+513:    console.log("Auth sync useEffect started");
+532:          const userRef = doc(db, 'users', currentUser.uid);
+533:          console.log("Fetching user profile for:", currentUser.uid);
+534:          let userSnap;
+536:            userSnap = await Promise.race([
+537:              getDoc(userRef),
+541:            console.error("Error fetching user profile:", err);
+546:          if (!userSnap.exists()) {
+548:            const q = query(collection(db, 'users'), where('email', '==', currentUser.email), limit(1));
+563:              await setDoc(userRef, currentProfile);
+582:              await setDoc(userRef, currentProfile);
+590:            console.log("User profile found:", userSnap.data());
+591:            currentProfile = userSnap.data() as UserProfile;
+601:              await updateDoc(userRef, { role, permissions });
+614:          const unsubProfile = onSnapshot(userRef, (doc) => {
+620:            // Only set fatal error if we don't have a profile yet and user is still logged in
+623:              handleFirestoreError(err, OperationType.GET, `users/${currentUser.uid}`);
+661:          // Listen for all users
+662:          const unsubUsers = onSnapshot(collection(db, 'users'), (snap) => {
+663:            const users = snap.docs.map(doc => doc.data() as UserProfile);
+664:            setAllUsers(users);
+669:              handleFirestoreError(err, OperationType.GET, 'users');
+823:        const fromRef = doc(db, 'users', profile.uid);
+824:        const toRef = doc(db, 'users', selectedUser.uid);
+1121:  const filteredUsers = useMemo(() => {
+1130:  const filteredTransactions = useMemo(() => {
+1139:  const leaderboard = useMemo(() => {
+1143:    // Non-privileged users only see themselves in the leaderboard
+1147:  const allMonths = useMemo(() => {
+1156:  const allSortedWeeks = useMemo(() => {
+1160:  const sortedWeeks = useMemo(() => {
+1164:  useEffect(() => {
+1174:  useEffect(() => {
+1178:      // The user specifically asked for default month.
+1185:  const filteredSales = useMemo(() => {
+1205:  const totalPkgValue = useMemo(() => {
+1237:      if (isEditingUser && userForm.uid) {
+1238:        const userRef = doc(db, 'users', userForm.uid);
+1239:        await updateDoc(userRef, {
+1240:          role: userForm.role,
+1241:          permissions: userForm.permissions,
+1246:        // Pre-provisioning a user profile
+1247:        if (!userForm.email) throw new Error("Email is required");
+1249:        // Check if user already exists
+1250:        const q = query(collection(db, 'users'), where('email', '==', userForm.email), limit(1));
+1253:          throw new Error("A user with this email already exists.");
+1256:        const newUserRef = doc(collection(db, 'users'));
+1258:          ...userForm,
+1259:          role: userForm.role || 'Agent',
+1260:          permissions: userForm.permissions || ['dashboard'],
+1262:          displayName: userForm.displayName || userForm.email.split('@')[0],
+1263:          photoURL: userForm.photoURL || `https://ui-avatars.com/api/?name=${userForm.email}&background=random`,
+1271:      setError(err.message || "Failed to update user.");
+1272:      handleFirestoreError(err, OperationType.WRITE, `users`);
+1278:  const handleEditUser = (user: UserProfile) => {
+1279:    setUserForm(user);
+1381:  if (!user) {
+1464:                    {hasPermission('userManagement') && (
+1465:                      <button onClick={() => { setActiveTab('userManagement'); setIsMenuOpen(false); }} className="text-sm text-zinc-600 hover:text-orange-600 text-left">User management</button>
+3044:        {activeTab === 'userManagement' && isAdmin && (
+3136:                      <img src={userForm.photoURL} className="w-12 h-12 rounded-full" alt="" referrerPolicy="no-referrer" />
+3138:                        <h4 className="font-bold">{userForm.displayName}</h4>
+3139:                        <p className="text-sm text-zinc-500">{userForm.email}</p>
+3149:                          placeholder="e.g. user@example.com"
+3151:                          value={userForm.email || ''}
+3152:                          onChange={(e) => setUserForm({...userForm, email: e.target.value})}
+3162:                          value={userForm.displayName || ''}
+3163:                          onChange={(e) => setUserForm({...userForm, displayName: e.target.value})}
+3173:                      value={userForm.role}
+3178:                          ...userForm, 
+3198:                            (Array.isArray(userForm.permissions) && userForm.permissions.includes(p.id)) ? "bg-green-500" : "bg-zinc-300"
+3305:                      // Sync all users with this role
+3306:                      const usersToUpdate = allUsers.filter(u => u.role === selectedRole.name);
+3307:                      for (const u of usersToUpdate) {
+3308:                        await updateDoc(doc(db, 'users', u.uid), {
