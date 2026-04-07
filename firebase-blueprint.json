@@ -9,7 +9,8 @@
         "email": { "type": "string", "format": "email", "description": "The user's email address" },
         "displayName": { "type": "string", "description": "The user's display name" },
         "photoURL": { "type": "string", "description": "The user's photo URL" },
-        "pointsBalance": { "type": "number", "description": "The current balance of Bravo points" }
+        "pointsBalance": { "type": "number", "description": "The current balance of Bravo points" },
+        "lastReadRemarks": { "type": "object", "description": "Map of saleId to remarksCount last read by user" }
       },
       "required": ["uid", "email", "displayName", "pointsBalance"]
     },
@@ -72,6 +73,8 @@
       "type": "object",
       "properties": {
         "name": { "type": "string", "description": "BDE name" },
+        "phone": { "type": "string", "description": "BDE phone number" },
+        "email": { "type": "string", "format": "email", "description": "BDE email address" },
         "createdAt": { "type": "string", "format": "date-time", "description": "When the BDE was created" }
       },
       "required": ["name"]
@@ -107,10 +110,25 @@
         "land": { "type": "string", "description": "Land status" },
         "hflIssue": { "type": "string", "description": "H+F+L issue" },
         "workPending": { "type": "string", "description": "Work pending" },
-        "remarks": { "type": "string", "description": "Remarks" },
+        "remarks": { "type": "string", "description": "Legacy remarks field" },
+        "remarksCount": { "type": "number", "description": "Count of log entries in remarks subcollection" },
         "createdAt": { "type": "string", "format": "date-time", "description": "When the record was created" }
       },
       "required": ["week", "date", "guestName", "agent", "destination", "tripId", "packageValue"]
+    },
+    "Remark": {
+      "title": "Remark",
+      "description": "A log entry for a sale issue",
+      "type": "object",
+      "properties": {
+        "date": { "type": "string", "description": "Date of log (DD/MM/YYYY)" },
+        "time": { "type": "string", "description": "Time of log (HH:mm)" },
+        "userName": { "type": "string", "description": "Name of the user who added the remark" },
+        "userUid": { "type": "string", "description": "UID of the user who added the remark" },
+        "text": { "type": "string", "description": "The remark text" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["date", "time", "userName", "userUid", "text", "createdAt"]
     },
     "TrainingMaterial": {
       "title": "TrainingMaterial",
@@ -143,6 +161,97 @@
         "createdAt": { "type": "string", "format": "date-time", "description": "When the role was created" }
       },
       "required": ["name", "permissions"]
+    },
+    "PagePassword": {
+      "title": "PagePassword",
+      "description": "Password protection for application pages",
+      "type": "object",
+      "properties": {
+        "pageId": { "type": "string", "description": "The ID of the page/tab" },
+        "password": { "type": "string", "description": "The password for the page" },
+        "isOpen": { "type": "boolean", "description": "Whether the page is open or password protected" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "When the password was last updated" }
+      },
+      "required": ["pageId", "password", "isOpen"]
+    },
+    "Incentive": {
+      "title": "Incentive",
+      "description": "Incentive due record",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "description": "Employee ID" },
+        "employeeName": { "type": "string", "description": "Employee name" },
+        "type": { "type": "string", "enum": ["Daily", "Weekly", "Monthly", "Quarterly", "Annually"], "description": "Incentive type" },
+        "amount": { "type": "number", "description": "Incentive amount" },
+        "date": { "type": "string", "format": "date", "description": "Date of incentive" },
+        "remarks": { "type": "string", "description": "Remarks" },
+        "recordedBy": { "type": "string", "description": "User who recorded the entry" },
+        "recordedAt": { "type": "string", "description": "Timestamp of recording" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When created" }
+      },
+      "required": ["employeeId", "employeeName", "type", "amount", "date"]
+    },
+    "IncentivePayment": {
+      "title": "IncentivePayment",
+      "description": "Incentive payment record",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "description": "Employee ID" },
+        "employeeName": { "type": "string", "description": "Employee name" },
+        "amount": { "type": "number", "description": "Payment amount" },
+        "date": { "type": "string", "format": "date", "description": "Date of payment" },
+        "paymentMethod": { "type": "string", "description": "Payment method (Cash, Bank Transfer, etc.)" },
+        "remarks": { "type": "string", "description": "Remarks" },
+        "recordedBy": { "type": "string", "description": "User who recorded the entry" },
+        "recordedAt": { "type": "string", "description": "Timestamp of recording" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When created" }
+      },
+      "required": ["employeeId", "employeeName", "amount", "date", "paymentMethod"]
+    },
+    "KnowledgeBaseEntry": {
+      "title": "KnowledgeBaseEntry",
+      "description": "A question and resolution entry in the knowledge base",
+      "type": "object",
+      "properties": {
+        "question": { "type": "string", "description": "The question or issue" },
+        "resolution": { "type": "string", "description": "The resolution or answer" },
+        "labels": { "type": "array", "items": { "type": "string" }, "description": "Labels for easy access" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When created" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "When last updated" },
+        "updatedBy": { "type": "string", "description": "User who last updated the entry" }
+      },
+      "required": ["question", "resolution", "labels"]
+    },
+    "MatrixReport": {
+      "title": "MatrixReport",
+      "description": "Daily performance matrix report",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "description": "Employee ID" },
+        "employeeName": { "type": "string", "description": "Employee name" },
+        "date": { "type": "string", "format": "date", "description": "Report date" },
+        "performancePoints": { "type": "number", "description": "Performance points" },
+        "totalCalls": { "type": "number", "description": "Total calls" },
+        "totalTalktime": { "type": "string", "description": "Total talktime" },
+        "topTalktimes": { 
+          "type": "array", 
+          "items": { 
+            "type": "object",
+            "properties": {
+              "tripId": { "type": "string" },
+              "phoneNo": { "type": "string" },
+              "talktime": { "type": "string" }
+            }
+          }
+        },
+        "loginTime": { "type": "string", "description": "Login time" },
+        "logoutTime": { "type": "string", "description": "Logout time" },
+        "breakTime": { "type": "string", "description": "Break time" },
+        "createdBy": { "type": "string" },
+        "createdByName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["employeeId", "employeeName", "date", "performancePoints", "totalCalls", "totalTalktime", "loginTime", "logoutTime", "breakTime"]
     }
   },
   "firestore": {
@@ -174,9 +283,33 @@
       "schema": "Sales",
       "description": "Sales master records"
     },
+    "/sales/{saleId}/remarks/{remarkId}": {
+      "schema": "Remark",
+      "description": "Remarks log for a sale"
+    },
     "/trainingMaterials/{trainingId}": {
       "schema": "TrainingMaterial",
       "description": "Training material master records"
+    },
+    "/pagePasswords/{pageId}": {
+      "schema": "PagePassword",
+      "description": "Page password configurations"
+    },
+    "/incentives/{incentiveId}": {
+      "schema": "Incentive",
+      "description": "Incentive due records"
+    },
+    "/incentivePayments/{paymentId}": {
+      "schema": "IncentivePayment",
+      "description": "Incentive payment records"
+    },
+    "/knowledgeBase/{entryId}": {
+      "schema": "KnowledgeBaseEntry",
+      "description": "Knowledge base entries"
+    },
+    "/matrixReports/{reportId}": {
+      "schema": "MatrixReport",
+      "description": "Daily performance matrix reports"
     }
   }
 }

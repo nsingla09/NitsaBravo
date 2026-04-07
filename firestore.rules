@@ -41,6 +41,13 @@ service cloud.firestore {
     //   - endDate: string (required)
     //   - month: string (required)
     //
+    // Collection: bdes
+    // Fields:
+    //   - name: string (required)
+    //   - phone: string (optional)
+    //   - email: string (optional)
+    //   - createdAt: timestamp (optional)
+    //
     // Collection: sales
     // Fields:
     //   - week: string (required)
@@ -92,16 +99,27 @@ service cloud.firestore {
              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent').lower() == 'trainer';
     }
 
+    function isBDE() {
+      return isAuthenticated() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent') is string &&
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent').lower() == 'bde';
+    }
+
     function isPrivileged() {
-      return isAdmin() || isManager() || isTrainer() || hasPermission('trainingOverview');
+      return isAdmin() || isManager() || isTrainer() || isBDE() || hasPermission('trainingOverview') || hasPermission('issueOverview');
     }
 
     function hasPermission(permission) {
       return isAdmin() || (permission == 'trainingOverview' && (isManager() || isTrainer())) || (
         isAuthenticated() && 
-        exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', []) is list &&
-        permission in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', [])
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) && (
+          (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', {}) is map &&
+           permission in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', {}) &&
+           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', {})[permission] in ['Limited', 'Complete']) ||
+          (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', []) is list &&
+           permission in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', []))
+        )
       );
     }
 
@@ -123,15 +141,23 @@ service cloud.firestore {
              data.displayName is string && data.displayName.size() > 0 &&
              data.pointsBalance is number &&
              data.role is string &&
-             data.permissions is list &&
+             data.permissions is map &&
+             (!('lastReadRemarks' in data) || data.lastReadRemarks is map) &&
              (!('updatedAt' in data) || data.updatedAt is timestamp) &&
              (!('createdAt' in data) || data.createdAt is timestamp) &&
-             (!('photoURL' in data) || data.photoURL is string);
+             (!('photoURL' in data) || data.photoURL is string) &&
+             (!('employeeName' in data) || data.employeeName is string);
     }
 
     function isValidRole(data) {
       return data.name is string && data.name.size() > 0 &&
-             data.permissions is list;
+             data.permissions is map;
+    }
+
+    function isValidBDE(data) {
+      return data.name is string && data.name.size() > 0 &&
+             (!('phone' in data) || data.phone is string) &&
+             (!('email' in data) || (data.email is string && isValidEmail(data.email)));
     }
 
     function isValidTransaction(data) {
@@ -154,13 +180,68 @@ service cloud.firestore {
              (!('priority' in data) || data.priority is number);
     }
 
+    function isValidRemark(data) {
+      return data.date is string &&
+             data.time is string &&
+             data.userName is string &&
+             data.userUid is string &&
+             data.text is string && data.text.size() > 0 && data.text.size() < 2000 &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidIncentive(data) {
+      return data.employeeId is string &&
+             data.employeeName is string &&
+             data.type in ["Daily", "Weekly", "Monthly", "Quarterly", "Annually", "Quarterly Performance Bonus", "Yearly Performance Bonus"] &&
+             data.amount is number &&
+             data.date is string &&
+             (!('remarks' in data) || data.remarks is string) &&
+             (!('isEligible' in data) || data.isEligible is bool) &&
+             (!('isPaid' in data) || data.isPaid is bool) &&
+             (!('recordedBy' in data) || data.recordedBy is string) &&
+             (!('recordedAt' in data) || data.recordedAt is string) &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidIncentivePayment(data) {
+      return data.employeeId is string &&
+             data.employeeName is string &&
+             data.amount is number &&
+             data.date is string &&
+             data.paymentMethod is string &&
+             (!('remarks' in data) || data.remarks is string) &&
+             (!('recordedBy' in data) || data.recordedBy is string) &&
+             (!('recordedAt' in data) || data.recordedAt is string) &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidMatrixReport(data) {
+      return data.employeeId is string &&
+             data.employeeName is string &&
+             data.date is string &&
+             data.performancePoints is number &&
+             data.totalCalls is number &&
+             data.totalTalktime is string &&
+             data.topTalktimes is list &&
+             data.loginTime is string &&
+             data.logoutTime is string &&
+             data.breakTime is string &&
+             (!('createdBy' in data) || data.createdBy is string) &&
+             (!('createdByName' in data) || data.createdByName is string) &&
+             (!('updatedBy' in data) || data.updatedBy is string) &&
+             (!('updatedByName' in data) || data.updatedByName is string) &&
+             (!('createdAt' in data) || data.createdAt is timestamp) &&
+             (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
 
     match /roles/{roleId} {
       allow read: if isAuthenticated();
-      allow write: if isAdmin() && isValidRole(request.resource.data);
+      allow create, update: if isAdmin() && isValidRole(request.resource.data);
+      allow delete: if isAdmin();
     }
 
     match /users/{userId} {
@@ -173,9 +254,10 @@ service cloud.firestore {
         (isAdmin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'role', 'permissions', 'updatedAt', 'photoURL', 'displayName', 
           'email', 'uid', 'createdAt', 'lastLoginAt', 'status', 
-          'department', 'title', 'managerId', 'pointsBalance'
+          'department', 'title', 'managerId', 'pointsBalance', 'lastReadRemarks'
         ]))
       );
+      allow delete: if isAdmin();
     }
 
     match /transactions/{transactionId} {
@@ -197,7 +279,8 @@ service cloud.firestore {
     match /employees/{employeeId} {
       allow read: if isAuthenticated() && (
         isPrivileged() || 
-        resource.data.get('email', '') == request.auth.token.email
+        resource.data.get('email', '') == request.auth.token.email ||
+        resource.data.get('bde', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.displayName
       );
       allow write: if isPrivileged();
     }
@@ -209,21 +292,75 @@ service cloud.firestore {
 
     match /bdes/{bdeId} {
       allow read: if isAuthenticated();
-      allow write: if isPrivileged();
+      allow create, update: if isPrivileged() && isValidBDE(request.resource.data);
+      allow delete: if isPrivileged();
     }
 
     match /sales/{saleId} {
       allow read: if isAuthenticated() && (
         isPrivileged() || 
         resource.data.get('agentEmail', '') == request.auth.token.email ||
-        resource.data.get('agent', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.displayName
+        resource.data.get('agent', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('displayName', '') ||
+        resource.data.get('agent', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('employeeName', '') ||
+        resource.data.get('bde', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('displayName', '') ||
+        resource.data.get('associateBde', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('displayName', '')
       );
       allow create: if isAuthenticated() && (
         isPrivileged() || 
-        (request.resource.data.get('agentEmail', '') == request.auth.token.email ||
-         request.resource.data.get('agent', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.displayName)
+        request.resource.data.get('agentEmail', '') == request.auth.token.email ||
+        request.resource.data.get('agent', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('displayName', '') ||
+        request.resource.data.get('agent', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('employeeName', '')
       );
-      allow update, delete: if isPrivileged();
+      allow update: if isPrivileged() || (
+        isAuthenticated() && 
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['remarksCount']) &&
+        (isPrivileged() || resource.data.get('agentEmail', '') == request.auth.token.email || hasPermission('issueOverview'))
+      );
+      allow delete: if isPrivileged();
+
+      match /remarks/{remarkId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated() && isValidRemark(request.resource.data) && request.resource.data.userUid == request.auth.uid;
+        allow update, delete: if isAdmin();
+      }
+    }
+
+    match /pagePasswords/{pageId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /incentives/{incentiveId} {
+      allow read: if isAuthenticated() && (
+        hasPermission('incentiveMaster') || 
+        isAdmin() || 
+        (exists(/databases/$(database)/documents/employees/$(resource.data.employeeId)) && 
+         get(/databases/$(database)/documents/employees/$(resource.data.employeeId)).data.get('email', '') == request.auth.token.email)
+      );
+      allow create, update: if hasPermission('incentiveMaster') && isValidIncentive(request.resource.data);
+      allow delete: if hasPermission('incentiveMaster');
+    }
+
+    match /incentivePayments/{paymentId} {
+      allow read: if isAuthenticated() && (
+        hasPermission('incentiveMaster') || 
+        isAdmin() || 
+        (exists(/databases/$(database)/documents/employees/$(resource.data.employeeId)) && 
+         get(/databases/$(database)/documents/employees/$(resource.data.employeeId)).data.get('email', '') == request.auth.token.email)
+      );
+      allow create, update: if hasPermission('incentiveMaster') && isValidIncentivePayment(request.resource.data);
+      allow delete: if hasPermission('incentiveMaster');
+    }
+
+    match /matrixReports/{reportId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isValidMatrixReport(request.resource.data) && (
+        isPrivileged() || 
+        request.resource.data.employeeId == request.auth.uid ||
+        (exists(/databases/$(database)/documents/employees/$(request.resource.data.employeeId)) && 
+         get(/databases/$(database)/documents/employees/$(request.resource.data.employeeId)).data.get('email', '') == request.auth.token.email)
+      );
+      allow delete: if isAdmin();
     }
 
     match /test/connection {
