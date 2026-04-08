@@ -1,6 +1,33 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, getDocs, orderBy, limit, onSnapshot, addDoc, serverTimestamp, runTransaction, getDocFromServer, or, and, increment, getDocFromCache, getDocsFromCache } from 'firebase/firestore';
+import { 
+  getFirestore, 
+  doc, 
+  getDoc, 
+  setDoc, 
+  updateDoc, 
+  deleteDoc, 
+  collection, 
+  query, 
+  where, 
+  getDocs, 
+  orderBy, 
+  limit, 
+  onSnapshot, 
+  addDoc, 
+  serverTimestamp, 
+  runTransaction, 
+  getDocFromServer, 
+  or, 
+  and, 
+  increment, 
+  getDocFromCache, 
+  getDocsFromCache,
+  enableIndexedDbPersistence,
+  getAggregateFromServer,
+  sum,
+  count
+} from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import firebaseConfig from '../firebase-applet-config.json';
 
@@ -9,6 +36,18 @@ console.log('Initializing Firebase with config:', firebaseConfig);
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId); // Use the named database
 console.log('Firestore initialized with database:', firebaseConfig.firestoreDatabaseId);
+
+// Enable Offline Persistence
+enableIndexedDbPersistence(db).catch((err) => {
+  if (err.code === 'failed-precondition') {
+    // Multiple tabs open, persistence can only be enabled in one tab at a a time.
+    console.warn('Firestore persistence failed: Multiple tabs open');
+  } else if (err.code === 'unimplemented') {
+    // The current browser does not support all of the features required to enable persistence
+    console.warn('Firestore persistence failed: Browser not supported');
+  }
+});
+
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
@@ -103,5 +142,8 @@ export {
   addDoc, 
   serverTimestamp,
   runTransaction,
-  increment
+  increment,
+  getAggregateFromServer,
+  sum,
+  count
 };

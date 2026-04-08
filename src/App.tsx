@@ -31,9 +31,13 @@ import {
   handleFirestoreError,
   OperationType,
   or,
+  and,
   increment,
   getDocFromCache,
-  getDocsFromCache
+  getDocsFromCache,
+  getAggregateFromServer,
+  sum,
+  count
 } from './firebase';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, 
@@ -79,7 +83,8 @@ import {
   X,
   LayoutGrid,
   Lock,
-  PhoneCall
+  PhoneCall,
+  Database
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { formatDistanceToNow, format, subDays } from 'date-fns';
@@ -708,6 +713,12 @@ const Modal = ({ isOpen, onClose, title, children, maxWidth = "max-w-2xl" }: { i
 // --- Main App ---
 
 export default function App() {
+  const [isQuotaExceeded, setIsQuotaExceeded] = useState(false);
+  const [isSalesLoaded, setIsSalesLoaded] = useState(false);
+  const [tripIdSearch, setTripIdSearch] = useState('');
+  const [isSearchingTripId, setIsSearchingTripId] = useState(false);
+  const [dashboardAggregates, setDashboardAggregates] = useState<any>(null);
+  const [isLoadingAggregates, setIsLoadingAggregates] = useState(false);
   const [user, setUser] = useState<any>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
@@ -855,6 +866,36 @@ export default function App() {
     totalTarget: 0,
     achievement: 0,
   });
+  const isAdmin = useMemo(() => profile?.role === 'Admin' || (profile?.email === 'nsingla09@gmail.com' && user?.emailVerified), [profile, user]);
+  const isManager = useMemo(() => profile?.role === 'Manager', [profile]);
+  const isTrainer = useMemo(() => profile?.role?.toLowerCase() === 'trainer', [profile]);
+  const isBDE = useMemo(() => profile?.role?.toLowerCase() === 'bde', [profile]);
+  const isSalesAgent = useMemo(() => profile?.role?.toLowerCase() === 'sales agent', [profile]);
+  const isAgent = useMemo(() => profile?.role?.toLowerCase() === 'agent' || isSalesAgent, [profile, isSalesAgent]);
+  
+  const hasTrainingOverviewPermission = useMemo(() => profile?.permissions ? (
+    Array.isArray(profile.permissions) 
+      ? profile.permissions.includes('trainingOverview') 
+      : profile.permissions['trainingOverview'] === 'Complete'
+  ) : false, [profile]);
+
+  const hasIssueOverviewPermission = useMemo(() => profile?.permissions ? (
+    Array.isArray(profile.permissions) 
+      ? profile.permissions.includes('issueOverview') 
+      : profile.permissions['issueOverview'] === 'Complete'
+  ) : false, [profile]);
+
+  const hasSalesComplete = useMemo(() => profile?.permissions ? (
+    !Array.isArray(profile.permissions) && profile.permissions['sales'] === 'Complete'
+  ) : false, [profile]);
+
+  const hasAgentOverviewComplete = useMemo(() => profile?.permissions ? (
+    !Array.isArray(profile.permissions) && profile.permissions['agentOverview'] === 'Complete'
+  ) : false, [profile]);
+
+  const isPrivileged = useMemo(() => isAdmin || isManager || isTrainer || isBDE || isSalesAgent || hasTrainingOverviewPermission || hasIssueOverviewPermission || hasSalesComplete || hasAgentOverviewComplete, 
+    [isAdmin, isManager, isTrainer, isBDE, isSalesAgent, hasTrainingOverviewPermission, hasIssueOverviewPermission, hasSalesComplete, hasAgentOverviewComplete]);
+
   const [contributionCalculationModal, setContributionCalculationModal] = useState<{
     isOpen: boolean;
     title: string;
@@ -1346,24 +1387,6 @@ export default function App() {
     role: 'Agent',
     permissions: ['dashboard'],
   });
-
-  const isAdmin = profile?.role === 'Admin' || (profile?.email === 'nsingla09@gmail.com' && auth.currentUser?.emailVerified);
-  const isManager = profile?.role === 'Manager';
-  const isTrainer = profile?.role?.toLowerCase() === 'trainer';
-  const isBDE = profile?.role?.toLowerCase() === 'bde';
-  const isSalesAgent = profile?.role?.toLowerCase() === 'sales agent';
-  const isAgent = profile?.role?.toLowerCase() === 'agent' || isSalesAgent;
-  const hasTrainingOverviewPermission = profile?.permissions ? (
-    Array.isArray(profile.permissions) 
-      ? profile.permissions.includes('trainingOverview') 
-      : profile.permissions['trainingOverview'] === 'Complete'
-  ) : false;
-  const hasIssueOverviewPermission = profile?.permissions ? (
-    Array.isArray(profile.permissions) 
-      ? profile.permissions.includes('issueOverview') 
-      : profile.permissions['issueOverview'] === 'Complete'
-  ) : false;
-  const isPrivileged = isAdmin || isManager || isTrainer || isBDE || hasTrainingOverviewPermission || hasIssueOverviewPermission;
 
   const isEmployee = useMemo(() => {
     return isAgent || employees.some(emp => emp.email && emp.email.toLowerCase() === profile?.email?.toLowerCase());
@@ -1857,6 +1880,9 @@ export default function App() {
               setAllUsers(users);
             }, (err) => {
               console.error("Users listener error:", err);
+              if (err.message.includes('Quota exceeded') || err.message.includes('quota limit exceeded')) {
+                setIsQuotaExceeded(true);
+              }
               if (auth.currentUser && !err.message.includes('Quota exceeded')) {
                 setFatalError(err);
                 handleFirestoreError(err, OperationType.GET, 'users');
@@ -1888,6 +1914,9 @@ export default function App() {
             setTransactions(trans);
           }, (err) => {
             console.error("Transactions listener error:", err);
+            if (err.message.includes('Quota exceeded') || err.message.includes('quota limit exceeded')) {
+              setIsQuotaExceeded(true);
+            }
             if (auth.currentUser && !err.message.includes('Quota exceeded')) {
               setFatalError(err);
               handleFirestoreError(err, OperationType.GET, 'transactions');
@@ -1933,41 +1962,6 @@ export default function App() {
             }
           });
           unsubsRef.current.push(unsubBDEs);
-
-          // Listen for Sales - Limit to last 60 days to save quota
-          const loadingWindowDays = isUserPrivileged ? 60 : 30;
-          const startDateLimit = subDays(new Date(), loadingWindowDays).toISOString().split('T')[0];
-          
-          const salesFilters = [
-            where('agentEmail', '==', currentUser.email || ''),
-            where('agent', '==', currentProfile.displayName || '')
-          ];
-
-          const currentEmpName = employeeName || currentProfile.employeeName;
-          if (currentEmpName) {
-            salesFilters.push(where('agent', '==', currentEmpName));
-          }
-          
-          if (bdeName) {
-            salesFilters.push(where('bde', '==', bdeName));
-            salesFilters.push(where('associateBde', '==', bdeName));
-          }
-
-          const salesQuery = isUserPrivileged
-            ? query(collection(db, 'sales'), where('date', '>=', startDateLimit), limit(500))
-            : query(collection(db, 'sales'), or(...salesFilters), limit(200));
-
-          const unsubSales = onSnapshot(salesQuery, (snap) => {
-            const salesList = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Sales));
-            setSales(salesList);
-          }, (err) => {
-            console.error("Sales listener error:", err);
-            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
-              setFatalError(err);
-              handleFirestoreError(err, OperationType.GET, 'sales');
-            }
-          });
-          unsubsRef.current.push(unsubSales);
 
           // Listen for employees
           const employeeFilters = [
@@ -2088,6 +2082,191 @@ export default function App() {
       cleanupListeners();
     };
   }, []);
+
+  useEffect(() => {
+    if (!user || !profile) {
+      setSales([]);
+      return;
+    }
+
+    // By default, load only last 5 days to save quota. 
+    // If isSalesLoaded is true, load full window (60 or 30 days).
+    const loadingWindowDays = isSalesLoaded ? (isPrivileged ? 60 : 30) : 5;
+    const startDateLimit = subDays(new Date(), loadingWindowDays).toISOString().split('T')[0];
+    
+    const salesFilters = [
+      where('agentEmail', '==', user.email || ''),
+      where('agent', '==', profile.displayName || '')
+    ];
+
+    if (profile.employeeName) {
+      salesFilters.push(where('agent', '==', profile.employeeName));
+    }
+    
+    if (profile.bdeName) {
+      salesFilters.push(where('bde', '==', profile.bdeName));
+      salesFilters.push(where('associateBde', '==', profile.bdeName));
+    }
+
+    const salesQuery = isPrivileged
+      ? query(collection(db, 'sales'), where('date', '>=', startDateLimit), limit(500))
+      : query(collection(db, 'sales'), or(...salesFilters), limit(200));
+
+    const unsubSales = onSnapshot(salesQuery, (snap) => {
+      const salesList = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Sales));
+      setSales(salesList);
+    }, (err) => {
+      console.error("Sales listener error:", err);
+      if (err.message.includes('Quota exceeded') || err.message.includes('quota limit exceeded')) {
+        setIsQuotaExceeded(true);
+      }
+      if (auth.currentUser && !err.message.includes('Quota exceeded')) {
+        setFatalError(err);
+        handleFirestoreError(err, OperationType.GET, 'sales');
+      }
+    });
+
+    return () => unsubSales();
+  }, [user, profile, isSalesLoaded, isPrivileged]);
+
+  useEffect(() => {
+    let timeoutId: any;
+
+    const fetchAggregates = async () => {
+      // If sales are fully loaded in memory, we don't need server-side aggregation
+      // because salesStats (calculated from filteredSales) will be accurate.
+      if (!user || !profile || !['dashboard', 'sales'].includes(activeTab) || isSalesLoaded || isQuotaExceeded) {
+        setDashboardAggregates(null);
+        return;
+      }
+      
+      setIsLoadingAggregates(true);
+      try {
+        const baseQuery = collection(db, 'sales');
+        const filters: any[] = [];
+        
+        const level = getPermissionLevel('sales');
+        if (level === 'Limited') {
+          const salesFilters = [
+            where('agentEmail', '==', user.email || ''),
+            where('agent', '==', profile.displayName || '')
+          ];
+          if (profile.employeeName) salesFilters.push(where('agent', '==', profile.employeeName));
+          if (profile.bdeName) {
+            salesFilters.push(where('bde', '==', profile.bdeName));
+            salesFilters.push(where('associateBde', '==', profile.bdeName));
+          }
+          filters.push(or(...salesFilters));
+        }
+
+        if (salesAgentFilter) {
+          const filterEmp = employees.find(e => e.name === salesAgentFilter);
+          if (filterEmp?.email) {
+            filters.push(or(where('agent', '==', salesAgentFilter), where('agentEmail', '==', filterEmp.email)));
+          } else {
+            filters.push(where('agent', '==', salesAgentFilter));
+          }
+        }
+        if (salesBdeFilter) {
+          const filterBde = bdes.find(b => b.name === salesBdeFilter);
+          if (filterBde?.email) {
+            filters.push(or(where('bde', '==', salesBdeFilter), where('bdeEmail', '==', filterBde.email)));
+          } else {
+            filters.push(where('bde', '==', salesBdeFilter));
+          }
+        }
+        if (salesWeekFilter) {
+          filters.push(where('week', '==', salesWeekFilter));
+        } else if (salesMonthFilter) {
+          const monthWeeks = weeks.filter(w => w.month === salesMonthFilter).map(w => w.weekName);
+          if (monthWeeks.length > 0) {
+            filters.push(where('week', 'in', monthWeeks));
+          } else {
+            setDashboardAggregates({
+              inhouse: { total: 0, value: 0, advance: 0, advanceValue: 0, cn: 0, cnValue: 0, confirmed: 0, confirmedValue: 0, cancel: 0, cancelValue: 0 },
+              branch: { total: 0, value: 0, advance: 0, advanceValue: 0, cn: 0, cnValue: 0, confirmed: 0, confirmedValue: 0, cancel: 0, cancelValue: 0 },
+              franchisee: { total: 0, value: 0, advance: 0, advanceValue: 0, cn: 0, cnValue: 0, confirmed: 0, confirmedValue: 0, cancel: 0, cancelValue: 0 },
+            });
+            setIsLoadingAggregates(false);
+            return;
+          }
+        }
+        
+        const categories = ['Inhouse', 'Branch', 'Franchisee Sales'];
+        const statuses = ['Advance', 'Credit Note', 'Done', 'Confirmed', 'Cancel'];
+        
+        const results: any = {
+          inhouse: { total: 0, value: 0, advance: 0, advanceValue: 0, cn: 0, cnValue: 0, confirmed: 0, confirmedValue: 0, cancel: 0, cancelValue: 0 },
+          branch: { total: 0, value: 0, advance: 0, advanceValue: 0, cn: 0, cnValue: 0, confirmed: 0, confirmedValue: 0, cancel: 0, cancelValue: 0 },
+          franchisee: { total: 0, value: 0, advance: 0, advanceValue: 0, cn: 0, cnValue: 0, confirmed: 0, confirmedValue: 0, cancel: 0, cancelValue: 0 },
+        };
+
+        // We'll do queries for each category and status to get full breakdown
+        for (const cat of categories) {
+          const catKey = cat === 'Inhouse' ? 'inhouse' : cat === 'Branch' ? 'branch' : 'franchisee';
+          
+          // If salesByFilter is set and doesn't match this category, skip it
+          if (salesByFilter !== 'All' && salesByFilter !== cat) {
+            continue;
+          }
+
+          const catFilters = [...filters];
+          if (cat === 'Inhouse') {
+            catFilters.push(or(where('salesBy', '==', 'Inhouse'), where('salesBy', '==', '')));
+          } else {
+            catFilters.push(where('salesBy', '==', cat));
+          }
+          
+          // Total for category
+          const qTotal = query(baseQuery, and(...catFilters));
+          const snapTotal = await getAggregateFromServer(qTotal, {
+            count: count(),
+            value: sum('packageValue')
+          });
+          results[catKey].total = snapTotal.data().count;
+          results[catKey].value = snapTotal.data().value || 0;
+
+          // Status breakdowns
+          const statusMap: any = {
+            'Advance': 'advance',
+            'Credit Note': 'cn',
+            'Done': 'confirmed',
+            'Confirmed': 'confirmed',
+            'Cancel': 'cancel'
+          };
+
+          for (const status of statuses) {
+            const statusFilters = [...catFilters, where('advanceCN', '==', status)];
+            const qStatus = query(baseQuery, and(...statusFilters));
+            const snapStatus = await getAggregateFromServer(qStatus, {
+              count: count(),
+              value: sum('packageValue')
+            });
+            
+            const key = statusMap[status];
+            if (key) {
+              results[catKey][key] += snapStatus.data().count;
+              results[catKey][key + 'Value'] += snapStatus.data().value || 0;
+            }
+          }
+        }
+
+        setDashboardAggregates(results);
+      } catch (err: any) {
+        console.error("Aggregation error:", err);
+        if (err.message?.includes('Quota exceeded') || err.message?.includes('quota limit exceeded')) {
+          setIsQuotaExceeded(true);
+        }
+      } finally {
+        setIsLoadingAggregates(false);
+      }
+    };
+
+    // Debounce the aggregation call to prevent quota exhaustion
+    timeoutId = setTimeout(fetchAggregates, 1000);
+
+    return () => clearTimeout(timeoutId);
+  }, [user, profile, activeTab, salesAgentFilter, salesBdeFilter, salesWeekFilter, salesMonthFilter, salesByFilter, weeks, isSalesLoaded, isQuotaExceeded]);
 
   useEffect(() => {
     if (profile && roles.length > 0 && !hasRedirectedRef.current) {
@@ -2456,6 +2635,36 @@ export default function App() {
   const handleLogout = async () => {
     hasRedirectedRef.current = false;
     await signOut(auth);
+  };
+
+  const handleTripIdSearch = async () => {
+    if (!tripIdSearch.trim()) return;
+    
+    setIsSearchingTripId(true);
+    try {
+      const q = query(collection(db, 'sales'), where('tripId', '==', tripIdSearch.trim()), limit(1));
+      const snap = await getDocs(q);
+      
+      if (snap.empty) {
+        alert("No sale found with this Trip ID.");
+      } else {
+        const foundSale = { id: snap.docs[0].id, ...snap.docs[0].data() } as Sales;
+        // Add to sales if not already there
+        setSales(prev => {
+          if (prev.some(s => s.id === foundSale.id)) return prev;
+          return [foundSale, ...prev];
+        });
+        // Switch to sales tab if not already there
+        setActiveTab('sales');
+        // Clear search
+        setTripIdSearch('');
+      }
+    } catch (err) {
+      console.error("Trip ID search error:", err);
+      handleFirestoreError(err, OperationType.GET, 'sales');
+    } finally {
+      setIsSearchingTripId(false);
+    }
   };
 
   const handleAwardPoints = async (e: React.FormEvent) => {
@@ -3905,6 +4114,17 @@ export default function App() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 py-8">
+        {isQuotaExceeded && (
+          <div className="mb-6 p-4 bg-orange-50 border border-orange-200 rounded-xl flex items-center gap-3 text-orange-800 shadow-sm animate-in fade-in slide-in-from-top-2">
+            <div className="p-2 bg-orange-100 rounded-lg">
+              <Database className="w-5 h-5 text-orange-600" />
+            </div>
+            <div className="flex-1">
+              <p className="text-sm font-bold">Viewing Cached Data</p>
+              <p className="text-xs opacity-90">The daily Firestore quota has been reached. You are viewing the last-seen data from your device's cache. New updates will appear once the quota resets tomorrow.</p>
+            </div>
+          </div>
+        )}
         <Modal
           isOpen={summaryDetailModal.isOpen}
           onClose={() => setSummaryDetailModal({ ...summaryDetailModal, isOpen: false })}
@@ -6973,7 +7193,35 @@ export default function App() {
                 <TrendingUp className="w-6 h-6 text-orange-600" />
                 <h2 className="text-3xl font-bold tracking-tight">Sales Master</h2>
               </div>
-              <div className="flex items-center gap-4">
+              <div className="flex items-center gap-3">
+                <div className="relative w-64">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+                  <input 
+                    type="text"
+                    placeholder="Search Trip ID..."
+                    className="w-full pl-9 pr-4 py-2 bg-white border border-zinc-200 rounded-lg focus:ring-2 focus:ring-orange-500 outline-none text-sm"
+                    value={tripIdSearch}
+                    onChange={(e) => setTripIdSearch(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleTripIdSearch()}
+                  />
+                </div>
+                <Button 
+                  onClick={handleTripIdSearch}
+                  isLoading={isSearchingTripId}
+                  variant="outline"
+                  className="bg-white"
+                >
+                  Search
+                </Button>
+                {!isSalesLoaded && (
+                  <Button 
+                    onClick={() => setIsSalesLoaded(true)}
+                    className="bg-zinc-900 hover:bg-zinc-800 flex items-center gap-2"
+                  >
+                    <Database className="w-4 h-4" />
+                    Load All Sales
+                  </Button>
+                )}
                 {getPermissionLevel('sales') === 'Complete' && (
                   <Button 
                     onClick={downloadSalesMaster}
@@ -7031,6 +7279,16 @@ export default function App() {
                 )}
             </div>
           </div>
+
+            {!isSalesLoaded && (
+              <div className="bg-orange-50 border border-orange-100 p-4 rounded-xl flex items-center gap-3 text-orange-800">
+                <Info className="w-5 h-5 text-orange-600" />
+                <p className="text-sm">
+                  Showing only recent sales (last 5 days) to save database reads. 
+                  Click <strong>"Load All Sales"</strong> to see the full history (last {isPrivileged ? '60' : '30'} days).
+                </p>
+              </div>
+            )}
 
             <Modal 
               isOpen={isSalesModalOpen} 
@@ -7526,109 +7784,123 @@ export default function App() {
               </div>
 
               {/* Summary Cards */}
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                <Card className="p-4 bg-orange-50 border-orange-100">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 bg-orange-100 rounded-lg">
-                      <TrendingUp className="w-5 h-5 text-orange-600" />
-                    </div>
-                    <div className="flex-1">
-                      <p className="text-[10px] font-bold text-orange-600 uppercase tracking-wider">Inhouse Sales</p>
-                      <p className="text-2xl font-bold text-zinc-900">{salesStats.inhouse.total}</p>
-                      <div className="mt-2 pt-2 border-t border-orange-200 grid grid-cols-2 gap-1 text-[9px] font-bold uppercase">
-                        <div className="text-orange-700">Adv: {salesStats.inhouse.advance}</div>
-                        <div className="text-orange-700">CN: {salesStats.inhouse.cn}</div>
-                        <div className="text-orange-700">Conf: {salesStats.inhouse.confirmed}</div>
-                        <div className="text-orange-700">Can: {salesStats.inhouse.cancel}</div>
-                      </div>
-                    </div>
+              <div className="relative">
+                {isLoadingAggregates && (
+                  <div className="absolute inset-0 bg-white/50 backdrop-blur-[1px] z-10 flex items-center justify-center rounded-xl">
+                    <Loader2 className="w-8 h-8 animate-spin text-orange-600" />
                   </div>
-                </Card>
-                <Card className="p-4 bg-orange-50 border-orange-100">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 bg-orange-100 rounded-lg">
-                      <TrendingUp className="w-5 h-5 text-orange-600" />
-                    </div>
-                    <div className="flex-1">
-                      <p className="text-[10px] font-bold text-orange-600 uppercase tracking-wider">Branch Sales</p>
-                      <p className="text-2xl font-bold text-zinc-900">{salesStats.branch.total}</p>
-                      <div className="mt-2 pt-2 border-t border-orange-200 grid grid-cols-2 gap-1 text-[9px] font-bold uppercase">
-                        <div className="text-orange-700">Adv: {salesStats.branch.advance}</div>
-                        <div className="text-orange-700">CN: {salesStats.branch.cn}</div>
-                        <div className="text-orange-700">Conf: {salesStats.branch.confirmed}</div>
-                        <div className="text-orange-700">Can: {salesStats.branch.cancel}</div>
-                      </div>
-                    </div>
-                  </div>
-                </Card>
-                <Card className="p-4 bg-orange-50 border-orange-100">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 bg-orange-100 rounded-lg">
-                      <TrendingUp className="w-5 h-5 text-orange-600" />
-                    </div>
-                    <div className="flex-1">
-                      <p className="text-[10px] font-bold text-orange-600 uppercase tracking-wider">Franchisee Sales</p>
-                      <p className="text-2xl font-bold text-zinc-900">{salesStats.franchisee.total}</p>
-                      <div className="mt-2 pt-2 border-t border-orange-200 grid grid-cols-2 gap-1 text-[9px] font-bold uppercase">
-                        <div className="text-orange-700">Adv: {salesStats.franchisee.advance}</div>
-                        <div className="text-orange-700">CN: {salesStats.franchisee.cn}</div>
-                        <div className="text-orange-700">Conf: {salesStats.franchisee.confirmed}</div>
-                        <div className="text-orange-700">Can: {salesStats.franchisee.cancel}</div>
-                      </div>
-                    </div>
-                  </div>
-                </Card>
-                <Card className="p-4 bg-zinc-900 text-white">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 bg-zinc-800 rounded-lg">
-                      <IndianRupee className="w-5 h-5 text-orange-400" />
-                    </div>
-                    <div className="flex-1">
-                      <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Inhouse Value</p>
-                      <p className="text-2xl font-bold text-white">₹{salesStats.inhouse.value.toLocaleString()}</p>
-                      <div className="mt-2 pt-2 border-t border-zinc-800 grid grid-cols-2 gap-1 text-[9px] font-bold uppercase">
-                        <div className="text-zinc-400">Adv: ₹{salesStats.inhouse.advanceValue.toLocaleString()}</div>
-                        <div className="text-zinc-400">CN: ₹{salesStats.inhouse.cnValue.toLocaleString()}</div>
-                        <div className="text-zinc-400">Conf: ₹{salesStats.inhouse.confirmedValue.toLocaleString()}</div>
-                        <div className="text-zinc-400">Can: ₹{salesStats.inhouse.cancelValue.toLocaleString()}</div>
-                      </div>
-                    </div>
-                  </div>
-                </Card>
-                <Card className="p-4 bg-zinc-900 text-white">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 bg-zinc-800 rounded-lg">
-                      <IndianRupee className="w-5 h-5 text-orange-400" />
-                    </div>
-                    <div className="flex-1">
-                      <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Branch Value</p>
-                      <p className="text-2xl font-bold text-white">₹{salesStats.branch.value.toLocaleString()}</p>
-                      <div className="mt-2 pt-2 border-t border-zinc-800 grid grid-cols-2 gap-1 text-[9px] font-bold uppercase">
-                        <div className="text-zinc-400">Adv: ₹{salesStats.branch.advanceValue.toLocaleString()}</div>
-                        <div className="text-zinc-400">CN: ₹{salesStats.branch.cnValue.toLocaleString()}</div>
-                        <div className="text-zinc-400">Conf: ₹{salesStats.branch.confirmedValue.toLocaleString()}</div>
-                        <div className="text-zinc-400">Can: ₹{salesStats.branch.cancelValue.toLocaleString()}</div>
-                      </div>
-                    </div>
-                  </div>
-                </Card>
-                <Card className="p-4 bg-zinc-900 text-white">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 bg-zinc-800 rounded-lg">
-                      <IndianRupee className="w-5 h-5 text-orange-400" />
-                    </div>
-                    <div className="flex-1">
-                      <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Franchisee Value</p>
-                      <p className="text-2xl font-bold text-white">₹{salesStats.franchisee.value.toLocaleString()}</p>
-                      <div className="mt-2 pt-2 border-t border-zinc-800 grid grid-cols-2 gap-1 text-[9px] font-bold uppercase">
-                        <div className="text-zinc-400">Adv: ₹{salesStats.franchisee.advanceValue.toLocaleString()}</div>
-                        <div className="text-zinc-400">CN: ₹{salesStats.franchisee.cnValue.toLocaleString()}</div>
-                        <div className="text-zinc-400">Conf: ₹{salesStats.franchisee.confirmedValue.toLocaleString()}</div>
-                        <div className="text-zinc-400">Can: ₹{salesStats.franchisee.cancelValue.toLocaleString()}</div>
-                      </div>
-                    </div>
-                  </div>
-                </Card>
+                )}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {(() => {
+                    const stats = dashboardAggregates || salesStats;
+                    return (
+                      <>
+                        <Card className="p-4 bg-orange-50 border-orange-100">
+                          <div className="flex items-center gap-3">
+                            <div className="p-2 bg-orange-100 rounded-lg">
+                              <TrendingUp className="w-5 h-5 text-orange-600" />
+                            </div>
+                            <div className="flex-1">
+                              <p className="text-[10px] font-bold text-orange-600 uppercase tracking-wider">Inhouse Sales</p>
+                              <p className="text-2xl font-bold text-zinc-900">{stats.inhouse.total}</p>
+                              <div className="mt-2 pt-2 border-t border-orange-200 grid grid-cols-2 gap-1 text-[9px] font-bold uppercase">
+                                <div className="text-orange-700">Adv: {stats.inhouse.advance}</div>
+                                <div className="text-orange-700">CN: {stats.inhouse.cn}</div>
+                                <div className="text-orange-700">Conf: {stats.inhouse.confirmed}</div>
+                                <div className="text-orange-700">Can: {stats.inhouse.cancel}</div>
+                              </div>
+                            </div>
+                          </div>
+                        </Card>
+                        <Card className="p-4 bg-orange-50 border-orange-100">
+                          <div className="flex items-center gap-3">
+                            <div className="p-2 bg-orange-100 rounded-lg">
+                              <TrendingUp className="w-5 h-5 text-orange-600" />
+                            </div>
+                            <div className="flex-1">
+                              <p className="text-[10px] font-bold text-orange-600 uppercase tracking-wider">Branch Sales</p>
+                              <p className="text-2xl font-bold text-zinc-900">{stats.branch.total}</p>
+                              <div className="mt-2 pt-2 border-t border-orange-200 grid grid-cols-2 gap-1 text-[9px] font-bold uppercase">
+                                <div className="text-orange-700">Adv: {stats.branch.advance}</div>
+                                <div className="text-orange-700">CN: {stats.branch.cn}</div>
+                                <div className="text-orange-700">Conf: {stats.branch.confirmed}</div>
+                                <div className="text-orange-700">Can: {stats.branch.cancel}</div>
+                              </div>
+                            </div>
+                          </div>
+                        </Card>
+                        <Card className="p-4 bg-orange-50 border-orange-100">
+                          <div className="flex items-center gap-3">
+                            <div className="p-2 bg-orange-100 rounded-lg">
+                              <TrendingUp className="w-5 h-5 text-orange-600" />
+                            </div>
+                            <div className="flex-1">
+                              <p className="text-[10px] font-bold text-orange-600 uppercase tracking-wider">Franchisee Sales</p>
+                              <p className="text-2xl font-bold text-zinc-900">{stats.franchisee.total}</p>
+                              <div className="mt-2 pt-2 border-t border-orange-200 grid grid-cols-2 gap-1 text-[9px] font-bold uppercase">
+                                <div className="text-orange-700">Adv: {stats.franchisee.advance}</div>
+                                <div className="text-orange-700">CN: {stats.franchisee.cn}</div>
+                                <div className="text-orange-700">Conf: {stats.franchisee.confirmed}</div>
+                                <div className="text-orange-700">Can: {stats.franchisee.cancel}</div>
+                              </div>
+                            </div>
+                          </div>
+                        </Card>
+                        <Card className="p-4 bg-zinc-900 text-white">
+                          <div className="flex items-center gap-3">
+                            <div className="p-2 bg-zinc-800 rounded-lg">
+                              <IndianRupee className="w-5 h-5 text-orange-400" />
+                            </div>
+                            <div className="flex-1">
+                              <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Inhouse Value</p>
+                              <p className="text-2xl font-bold text-white">₹{stats.inhouse.value.toLocaleString()}</p>
+                              <div className="mt-2 pt-2 border-t border-zinc-800 grid grid-cols-2 gap-1 text-[9px] font-bold uppercase">
+                                <div className="text-zinc-400">Adv: ₹{stats.inhouse.advanceValue.toLocaleString()}</div>
+                                <div className="text-zinc-400">CN: ₹{stats.inhouse.cnValue.toLocaleString()}</div>
+                                <div className="text-zinc-400">Conf: ₹{stats.inhouse.confirmedValue.toLocaleString()}</div>
+                                <div className="text-zinc-400">Can: ₹{stats.inhouse.cancelValue.toLocaleString()}</div>
+                              </div>
+                            </div>
+                          </div>
+                        </Card>
+                        <Card className="p-4 bg-zinc-900 text-white">
+                          <div className="flex items-center gap-3">
+                            <div className="p-2 bg-zinc-800 rounded-lg">
+                              <IndianRupee className="w-5 h-5 text-orange-400" />
+                            </div>
+                            <div className="flex-1">
+                              <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Branch Value</p>
+                              <p className="text-2xl font-bold text-white">₹{stats.branch.value.toLocaleString()}</p>
+                              <div className="mt-2 pt-2 border-t border-zinc-800 grid grid-cols-2 gap-1 text-[9px] font-bold uppercase">
+                                <div className="text-zinc-400">Adv: ₹{stats.branch.advanceValue.toLocaleString()}</div>
+                                <div className="text-zinc-400">CN: ₹{stats.branch.cnValue.toLocaleString()}</div>
+                                <div className="text-zinc-400">Conf: ₹{stats.branch.confirmedValue.toLocaleString()}</div>
+                                <div className="text-zinc-400">Can: ₹{stats.branch.cancelValue.toLocaleString()}</div>
+                              </div>
+                            </div>
+                          </div>
+                        </Card>
+                        <Card className="p-4 bg-zinc-900 text-white">
+                          <div className="flex items-center gap-3">
+                            <div className="p-2 bg-zinc-800 rounded-lg">
+                              <IndianRupee className="w-5 h-5 text-orange-400" />
+                            </div>
+                            <div className="flex-1">
+                              <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Franchisee Value</p>
+                              <p className="text-2xl font-bold text-white">₹{stats.franchisee.value.toLocaleString()}</p>
+                              <div className="mt-2 pt-2 border-t border-zinc-800 grid grid-cols-2 gap-1 text-[9px] font-bold uppercase">
+                                <div className="text-zinc-400">Adv: ₹{stats.franchisee.advanceValue.toLocaleString()}</div>
+                                <div className="text-zinc-400">CN: ₹{stats.franchisee.cnValue.toLocaleString()}</div>
+                                <div className="text-zinc-400">Conf: ₹{stats.franchisee.confirmedValue.toLocaleString()}</div>
+                                <div className="text-zinc-400">Can: ₹{stats.franchisee.cancelValue.toLocaleString()}</div>
+                              </div>
+                            </div>
+                          </div>
+                        </Card>
+                      </>
+                    );
+                  })()}
+                </div>
               </div>
 
               <h3 className="text-lg font-bold">Sales Records</h3>
