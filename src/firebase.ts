@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, getDocs, orderBy, limit, onSnapshot, addDoc, serverTimestamp, runTransaction, getDocFromServer, or, and, increment } from 'firebase/firestore';
+import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, getDocs, orderBy, limit, onSnapshot, addDoc, serverTimestamp, runTransaction, getDocFromServer, or, and, increment, getDocFromCache, getDocsFromCache } from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import firebaseConfig from '../firebase-applet-config.json';
 
@@ -18,7 +18,7 @@ const bucket = firebaseConfig.storageBucket?.startsWith('gs://')
   : `gs://${firebaseConfig.storageBucket}`;
 export const storage = getStorage(app, bucket);
 
-export { or, and, ref, uploadBytes, getDownloadURL };
+export { or, and, ref, uploadBytes, getDownloadURL, getDocFromCache, getDocsFromCache };
 
 // Error handling helper
 export enum OperationType {

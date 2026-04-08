@@ -31,7 +31,9 @@ import {
   handleFirestoreError,
   OperationType,
   or,
-  increment
+  increment,
+  getDocFromCache,
+  getDocsFromCache
 } from './firebase';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, 
@@ -88,7 +90,8 @@ import { AIChatBot } from './components/AIChatBot';
 // --- Utilities ---
 const generateTalktimeOptions = () => {
   const options = [];
-  for (let i = 0; i <= 300; i += 15) {
+  // Increased to 15 hours (900 minutes) to cover all possible shift lengths
+  for (let i = 0; i <= 900; i += 5) {
     const hours = Math.floor(i / 60);
     const mins = i % 60;
     let label = '';
@@ -373,6 +376,8 @@ interface UserProfile {
   pointsBalance: number;
   role?: string;
   employeeName?: string;
+  employeeId?: string;
+  bdeName?: string;
   permissions?: string[] | Record<string, 'Limited' | 'Complete' | string>;
   lastReadRemarks?: Record<string, number>;
 }
@@ -1248,6 +1253,8 @@ export default function App() {
     id: string;
     type: 'employee' | 'week' | 'bde' | 'sales' | 'user' | 'trainingMaterials' | 'role';
     name: string;
+    passwordInput?: string;
+    error?: string | null;
   } | null>(null);
   const unsubsRef = useRef<(() => void)[]>([]);
   const hasRedirectedRef = useRef(false);
@@ -1344,6 +1351,8 @@ export default function App() {
   const isManager = profile?.role === 'Manager';
   const isTrainer = profile?.role?.toLowerCase() === 'trainer';
   const isBDE = profile?.role?.toLowerCase() === 'bde';
+  const isSalesAgent = profile?.role?.toLowerCase() === 'sales agent';
+  const isAgent = profile?.role?.toLowerCase() === 'agent' || isSalesAgent;
   const hasTrainingOverviewPermission = profile?.permissions ? (
     Array.isArray(profile.permissions) 
       ? profile.permissions.includes('trainingOverview') 
@@ -1357,8 +1366,8 @@ export default function App() {
   const isPrivileged = isAdmin || isManager || isTrainer || isBDE || hasTrainingOverviewPermission || hasIssueOverviewPermission;
 
   const isEmployee = useMemo(() => {
-    return employees.some(emp => emp.email && emp.email.toLowerCase() === profile?.email?.toLowerCase());
-  }, [employees, profile]);
+    return isAgent || employees.some(emp => emp.email && emp.email.toLowerCase() === profile?.email?.toLowerCase());
+  }, [employees, profile, isAgent]);
 
   const bdeUser = useMemo(() => {
     return bdes.find(b => b.email && b.email.toLowerCase() === profile?.email?.toLowerCase());
@@ -1368,7 +1377,7 @@ export default function App() {
     return employees.find(e => e.email?.toLowerCase() === profile?.email?.toLowerCase());
   }, [employees, profile]);
 
-  const isBDEUser = !!bdeUser;
+  const isBDEUser = isBDE || !!bdeUser;
   const currentBDEName = bdeUser?.name || '';
   const currentEmployeeName = currentEmployee?.name || '';
 
@@ -1423,8 +1432,12 @@ export default function App() {
 
     // Legacy/Default logic
     if ((permission === 'trainingOverview' || permission === 'issueOverview') && (isManager || isTrainer)) return 'Complete';
-    if (permission === 'agentOverview' || permission === 'sales' || permission === 'bdeOverview' || permission === 'issueOverview' || permission === 'matrixMaster') {
-      if (isEmployee || isBDEUser) return 'Limited';
+    
+    // Sales Agent specific overrides
+    if (isSalesAgent && (permission === 'sales' || permission === 'agentOverview' || permission === 'matrixMaster')) return 'Complete';
+
+    if (permission === 'dashboard' || permission === 'agentOverview' || permission === 'sales' || permission === 'bdeOverview' || permission === 'issueOverview' || permission === 'matrixMaster' || permission === 'training') {
+      if (isEmployee || isBDEUser || isBDE || isAgent) return 'Limited';
     }
     
     return 'None';
@@ -1483,6 +1496,13 @@ export default function App() {
     }).sort((a, b) => a.name.localeCompare(b.name));
   }, [employees, employeeSearchQuery, employeeStatusFilter, employeeAssocBdeFilter, profile, getPermissionLevel]);
 
+  const fetchWithTimeout = async <T,>(promise: Promise<T>, timeoutMs: number = 30000, errorMsg: string = 'Request Timeout'): Promise<T> => {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) => setTimeout(() => reject(new Error(errorMsg)), timeoutMs))
+    ]);
+  };
+
   // --- Auth & Profile Sync ---
   useEffect(() => {
     console.log("Auth sync useEffect started");
@@ -1508,22 +1528,45 @@ export default function App() {
           console.log("Fetching user profile for:", currentUser.uid);
           let userSnap;
           try {
-            userSnap = await Promise.race([
-              getDoc(userRef),
-              new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
-            ]);
+            userSnap = await fetchWithTimeout(getDoc(userRef), 30000, 'Profile Fetch Timeout');
+            console.log("User profile fetch completed");
           } catch (err) {
             console.error("Error fetching user profile:", err);
-            throw err;
+            const errorString = err instanceof Error ? err.message : String(err);
+            if (errorString.includes('Quota exceeded') || errorString.includes('quota limit exceeded')) {
+              try {
+                userSnap = await getDocFromCache(userRef);
+                console.log("Using cached profile due to quota error");
+              } catch (cacheErr) {
+                throw err;
+              }
+            } else {
+              throw err;
+            }
           }
           
           let currentProfile: UserProfile;
-          if (!userSnap.exists()) {
+          if (!userSnap || !userSnap.exists()) {
             console.log("User profile not found by UID, checking by email...");
             const q = query(collection(db, 'users'), where('email', '==', currentUser.email), limit(1));
-            const querySnap = await getDocs(q);
+            let querySnap;
+            try {
+              querySnap = await fetchWithTimeout(getDocs(q), 30000, 'Email Profile Fetch Timeout');
+            } catch (err) {
+              const errorString = err instanceof Error ? err.message : String(err);
+              if (errorString.includes('Quota exceeded') || errorString.includes('quota limit exceeded')) {
+                try {
+                  querySnap = await getDocsFromCache(q);
+                  console.log("Using cached email search due to quota error");
+                } catch (cacheErr) {
+                  throw err;
+                }
+              } else {
+                throw err;
+              }
+            }
             
-            if (!querySnap.empty) {
+            if (querySnap && !querySnap.empty) {
               console.log("Found pre-provisioned profile by email, migrating to UID...");
               const preDoc = querySnap.docs[0];
               const preData = preDoc.data() as UserProfile;
@@ -1586,9 +1629,16 @@ export default function App() {
             currentProfile = userSnap.data() as UserProfile;
             
             // Ensure role and permissions exist
+            const defaultKeys = ['dashboard', 'sales', 'training', 'bdeOverview', 'agentOverview', 'issueOverview', 'matrixMaster'];
+            let needsUpdate = false;
+            
             if (!currentProfile.role) {
               const role = (currentProfile.email === 'nsingla09@gmail.com' && currentUser.emailVerified) ? 'Admin' : 'Agent';
-              
+              currentProfile.role = role;
+              needsUpdate = true;
+            }
+
+            if (!currentProfile.permissions || typeof currentProfile.permissions !== 'object' || Array.isArray(currentProfile.permissions)) {
               const adminPermissions: Record<string, 'Limited' | 'Complete'> = {};
               allPermissions.forEach(p => { adminPermissions[p.id] = 'Complete'; });
               
@@ -1596,18 +1646,32 @@ export default function App() {
                 dashboard: 'Complete',
                 sales: 'Limited',
                 training: 'Limited',
-                bdeOverview: 'Limited'
+                bdeOverview: 'Limited',
+                agentOverview: 'Limited',
+                issueOverview: 'Limited',
+                matrixMaster: 'Limited'
               };
 
-              const permissions = role === 'Admin' 
-                ? adminPermissions
-                : defaultPermissions;
-              currentProfile.role = role;
-              currentProfile.permissions = permissions;
+              currentProfile.permissions = currentProfile.role === 'Admin' ? adminPermissions : defaultPermissions;
+              needsUpdate = true;
+            } else {
+              // Add missing default permissions
+              defaultKeys.forEach(key => {
+                if (!(key in currentProfile.permissions)) {
+                  currentProfile.permissions[key] = 'Limited';
+                  needsUpdate = true;
+                }
+              });
+            }
+
+            if (needsUpdate) {
               try {
-                await updateDoc(userRef, { role, permissions });
+                await updateDoc(userRef, { 
+                  role: currentProfile.role, 
+                  permissions: currentProfile.permissions 
+                });
               } catch (err) {
-                console.warn("Could not update role/permissions in DB, using local defaults", err);
+                console.warn("Could not update profile in DB", err);
               }
             }
             setProfile(currentProfile);
@@ -1617,64 +1681,94 @@ export default function App() {
           }
 
           // Check if user is a BDE to get their name for queries
-          let bdeName = '';
-          try {
-            const bdeQuery = query(collection(db, 'bdes'), where('email', '==', currentUser.email));
-            const bdeSnap = await getDocs(bdeQuery);
-            if (!bdeSnap.empty) {
-              bdeName = bdeSnap.docs[0].data().name;
-              
-              // Assign BDE role if not already privileged
-              if (!currentProfile.role || currentProfile.role === 'Agent') {
-                currentProfile.role = 'BDE';
-                currentProfile.permissions = {
-                  ...(currentProfile.permissions || {}),
-                  dashboard: 'Complete',
-                  sales: 'Limited',
-                  agentOverview: 'Limited',
-                  bdeOverview: 'Limited',
-                  training: 'Limited'
-                };
+          let bdeName = currentProfile.bdeName || '';
+          if (!bdeName) {
+            try {
+              const bdeQuery = query(collection(db, 'bdes'), where('email', '==', currentUser.email));
+              let bdeSnap;
+              try {
+                bdeSnap = await fetchWithTimeout(getDocs(bdeQuery), 30000, 'BDE Status Fetch Timeout');
+              } catch (err) {
+                const errorString = err instanceof Error ? err.message : String(err);
+                if (errorString.includes('Quota exceeded') || errorString.includes('quota limit exceeded')) {
+                  bdeSnap = await getDocsFromCache(bdeQuery);
+                } else {
+                  throw err;
+                }
+              }
+
+              if (bdeSnap && !bdeSnap.empty) {
+                bdeName = bdeSnap.docs[0].data().name;
+                currentProfile.bdeName = bdeName;
+                
+                // Assign BDE role if not already privileged
+                if (!currentProfile.role || currentProfile.role === 'Agent' || currentProfile.role === 'Sales Agent') {
+                  currentProfile.role = 'BDE';
+                  currentProfile.permissions = {
+                    ...(currentProfile.permissions || {}),
+                    dashboard: 'Complete',
+                    sales: 'Limited',
+                    agentOverview: 'Limited',
+                    bdeOverview: 'Limited',
+                    training: 'Limited'
+                  };
+                }
+                
                 try {
                   await updateDoc(userRef, { 
-                    role: 'BDE', 
+                    bdeName,
+                    role: currentProfile.role, 
                     permissions: currentProfile.permissions 
                   });
-                  setProfile(currentProfile);
-                } catch (err) {
-                  console.warn("Failed to update BDE role in DB", err);
-                }
-              }
-            }
-          } catch (err) {
-            console.error("Error checking BDE status:", err);
-          }
-
-          let employeeName = '';
-          try {
-            const empQuery = query(collection(db, 'employees'), where('email', '==', currentUser.email));
-            const empSnap = await getDocs(empQuery);
-            if (!empSnap.empty) {
-              employeeName = empSnap.docs[0].data().name;
-              // Update profile with employee name if it's not there
-              if (currentProfile.employeeName !== employeeName) {
-                currentProfile.employeeName = employeeName;
-                try {
-                  await updateDoc(userRef, { employeeName });
                   setProfile({ ...currentProfile });
                 } catch (err) {
-                  console.warn("Could not update employeeName in DB", err);
+                  console.warn("Failed to update BDE info in DB", err);
                 }
               }
+            } catch (err) {
+              console.error("Error checking BDE status:", err);
             }
-          } catch (err) {
-            console.error("Error checking employee status:", err);
+          }
+
+          let employeeName = currentProfile.employeeName || '';
+          let employeeId = currentProfile.employeeId || '';
+          if (!employeeName || !employeeId) {
+            try {
+              const empQuery = query(collection(db, 'employees'), where('email', '==', currentUser.email));
+              let empSnap;
+              try {
+                empSnap = await fetchWithTimeout(getDocs(empQuery), 30000, 'Employee Status Fetch Timeout');
+              } catch (err) {
+                const errorString = err instanceof Error ? err.message : String(err);
+                if (errorString.includes('Quota exceeded') || errorString.includes('quota limit exceeded')) {
+                  empSnap = await getDocsFromCache(empQuery);
+                } else {
+                  throw err;
+                }
+              }
+
+              if (empSnap && !empSnap.empty) {
+                employeeName = empSnap.docs[0].data().name;
+                employeeId = empSnap.docs[0].id;
+                currentProfile.employeeName = employeeName;
+                currentProfile.employeeId = employeeId;
+                try {
+                  await updateDoc(userRef, { employeeName, employeeId });
+                  setProfile({ ...currentProfile });
+                } catch (err) {
+                  console.warn("Could not update employee info in DB", err);
+                }
+              }
+            } catch (err) {
+              console.error("Error checking employee status:", err);
+            }
           }
 
           const isUserAdmin = currentProfile.role?.toLowerCase() === 'admin' || (currentProfile.email === 'nsingla09@gmail.com' && currentUser.emailVerified);
           const isUserManager = currentProfile.role?.toLowerCase() === 'manager';
           const isUserTrainer = currentProfile.role?.toLowerCase() === 'trainer';
           const isUserBDE = currentProfile.role?.toLowerCase() === 'bde';
+          const isUserSalesAgent = currentProfile.role?.toLowerCase() === 'sales agent';
           const hasTrainingOverviewPermission = currentProfile.permissions ? (
             Array.isArray(currentProfile.permissions)
               ? currentProfile.permissions.includes('trainingOverview')
@@ -1685,7 +1779,13 @@ export default function App() {
               ? currentProfile.permissions.includes('issueOverview')
               : currentProfile.permissions['issueOverview'] === 'Complete'
           ) : false;
-          const isUserPrivileged = isUserAdmin || isUserManager || isUserTrainer || isUserBDE || hasTrainingOverviewPermission || hasIssueOverviewPermission;
+          const hasSalesComplete = currentProfile.permissions ? (
+            !Array.isArray(currentProfile.permissions) && currentProfile.permissions['sales'] === 'Complete'
+          ) : false;
+          const hasAgentOverviewComplete = currentProfile.permissions ? (
+            !Array.isArray(currentProfile.permissions) && currentProfile.permissions['agentOverview'] === 'Complete'
+          ) : false;
+          const isUserPrivileged = isUserAdmin || isUserManager || isUserTrainer || isUserBDE || isUserSalesAgent || hasTrainingOverviewPermission || hasIssueOverviewPermission || hasSalesComplete || hasAgentOverviewComplete;
 
           console.log("Starting Firestore listeners...");
           const unsubProfile = onSnapshot(userRef, (doc) => {
@@ -1703,7 +1803,7 @@ export default function App() {
           unsubsRef.current.push(unsubProfile);
 
           // Listen for roles
-          const unsubRoles = onSnapshot(collection(db, 'roles'), (snap) => {
+          const unsubRoles = onSnapshot(query(collection(db, 'roles'), limit(50)), (snap) => {
             const rolesList = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Role));
             setRoles(rolesList);
             
@@ -1734,7 +1834,9 @@ export default function App() {
             }
           }, (err) => {
             console.error("Roles listener error:", err);
-            if (auth.currentUser) handleFirestoreError(err, OperationType.GET, 'roles');
+            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
+              handleFirestoreError(err, OperationType.GET, 'roles');
+            }
           });
           unsubsRef.current.push(unsubRoles);
 
@@ -1748,14 +1850,14 @@ export default function App() {
           });
           unsubsRef.current.push(unsubLeaderboard);
 
-          // Listen for all users - ONLY for privileged users
+          // Listen for all users - ONLY for privileged users - Limit to 100 to save quota
           if (isUserAdmin || isUserManager) {
-            const unsubUsers = onSnapshot(collection(db, 'users'), (snap) => {
+            const unsubUsers = onSnapshot(query(collection(db, 'users'), limit(100)), (snap) => {
               const users = snap.docs.map(doc => doc.data() as UserProfile);
               setAllUsers(users);
             }, (err) => {
               console.error("Users listener error:", err);
-              if (auth.currentUser) {
+              if (auth.currentUser && !err.message.includes('Quota exceeded')) {
                 setFatalError(err);
                 handleFirestoreError(err, OperationType.GET, 'users');
               }
@@ -1770,7 +1872,8 @@ export default function App() {
                 or(
                   where('fromUid', '==', currentUser.uid),
                   where('toUid', '==', currentUser.uid)
-                ));
+                ),
+                limit(20));
 
           const unsubTrans = onSnapshot(transQuery, (snap) => {
             const trans = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Transaction));
@@ -1781,13 +1884,11 @@ export default function App() {
                 const dateB = b.createdAt?.toMillis ? b.createdAt.toMillis() : 0;
                 return dateB - dateA;
               });
-              setTransactions(trans.slice(0, 50));
-            } else {
-              setTransactions(trans);
             }
+            setTransactions(trans);
           }, (err) => {
             console.error("Transactions listener error:", err);
-            if (auth.currentUser) {
+            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
               setFatalError(err);
               handleFirestoreError(err, OperationType.GET, 'transactions');
             }
@@ -1795,12 +1896,12 @@ export default function App() {
           unsubsRef.current.push(unsubTrans);
 
           // Listen for Training Materials
-          const unsubTraining = onSnapshot(collection(db, 'trainingMaterials'), (snap) => {
+          const unsubTraining = onSnapshot(query(collection(db, 'trainingMaterials'), limit(100)), (snap) => {
             const training = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as TrainingMaterial));
             setTrainingMaterials(training);
           }, (err) => {
             console.error("Training materials listener error:", err);
-            if (auth.currentUser) {
+            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
               setFatalError(err);
               handleFirestoreError(err, OperationType.GET, 'trainingMaterials');
             }
@@ -1808,12 +1909,12 @@ export default function App() {
           unsubsRef.current.push(unsubTraining);
 
           // Listen for weeks
-          const unsubWeeks = onSnapshot(collection(db, 'weeks'), (snap) => {
+          const unsubWeeks = onSnapshot(query(collection(db, 'weeks'), limit(100)), (snap) => {
             const wks = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Week));
             setWeeks(wks);
           }, (err) => {
             console.error("Weeks listener error:", err);
-            if (auth.currentUser) {
+            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
               setFatalError(err);
               handleFirestoreError(err, OperationType.GET, 'weeks');
             }
@@ -1821,20 +1922,21 @@ export default function App() {
           unsubsRef.current.push(unsubWeeks);
 
           // Listen for BDEs
-          const unsubBDEs = onSnapshot(collection(db, 'bdes'), (snap) => {
+          const unsubBDEs = onSnapshot(query(collection(db, 'bdes'), limit(100)), (snap) => {
             const bdeList = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as BDE));
             setBDES(bdeList);
           }, (err) => {
             console.error("BDEs listener error:", err);
-            if (auth.currentUser) {
+            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
               setFatalError(err);
               handleFirestoreError(err, OperationType.GET, 'bdes');
             }
           });
           unsubsRef.current.push(unsubBDEs);
 
-          // Listen for Sales - Limit to last 90 days for privileged users to save quota
-          const ninetyDaysAgo = subDays(new Date(), 90).toISOString().split('T')[0];
+          // Listen for Sales - Limit to last 60 days to save quota
+          const loadingWindowDays = isUserPrivileged ? 60 : 30;
+          const startDateLimit = subDays(new Date(), loadingWindowDays).toISOString().split('T')[0];
           
           const salesFilters = [
             where('agentEmail', '==', currentUser.email || ''),
@@ -1852,15 +1954,15 @@ export default function App() {
           }
 
           const salesQuery = isUserPrivileged
-            ? query(collection(db, 'sales'), where('date', '>=', ninetyDaysAgo))
-            : query(collection(db, 'sales'), or(...salesFilters));
+            ? query(collection(db, 'sales'), where('date', '>=', startDateLimit), limit(500))
+            : query(collection(db, 'sales'), or(...salesFilters), limit(200));
 
           const unsubSales = onSnapshot(salesQuery, (snap) => {
             const salesList = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Sales));
             setSales(salesList);
           }, (err) => {
             console.error("Sales listener error:", err);
-            if (auth.currentUser) {
+            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
               setFatalError(err);
               handleFirestoreError(err, OperationType.GET, 'sales');
             }
@@ -1877,17 +1979,17 @@ export default function App() {
           }
 
           const employeesQuery = isUserPrivileged
-            ? collection(db, 'employees')
+            ? query(collection(db, 'employees'), limit(200))
             : (employeeFilters.length > 1 
-                ? query(collection(db, 'employees'), or(...employeeFilters))
-                : query(collection(db, 'employees'), employeeFilters[0]));
+                ? query(collection(db, 'employees'), or(...employeeFilters), limit(50))
+                : query(collection(db, 'employees'), employeeFilters[0], limit(50)));
 
           const unsubEmployees = onSnapshot(employeesQuery, (snap) => {
             const emps = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Employee));
             setEmployees(emps);
           }, (err) => {
             console.error("Employees listener error:", err);
-            if (auth.currentUser) {
+            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
               setFatalError(err);
               handleFirestoreError(err, OperationType.GET, 'employees');
             }
@@ -1895,22 +1997,34 @@ export default function App() {
           unsubsRef.current.push(unsubEmployees);
 
           // Listen for Incentives
-          const unsubIncentives = onSnapshot(collection(db, 'incentives'), (snap) => {
+          const incentiveQuery = isUserPrivileged
+            ? query(collection(db, 'incentives'), limit(100))
+            : query(collection(db, 'incentives'), where('employeeId', '==', employeeId || 'none'), limit(50));
+
+          const unsubIncentives = onSnapshot(incentiveQuery, (snap) => {
             const incs = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Incentive));
             setIncentives(incs);
           }, (err) => {
             console.error("Incentives listener error:", err);
-            if (auth.currentUser) handleFirestoreError(err, OperationType.GET, 'incentives');
+            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
+              handleFirestoreError(err, OperationType.GET, 'incentives');
+            }
           });
           unsubsRef.current.push(unsubIncentives);
 
           // Listen for Incentive Payments
-          const unsubIncentivePayments = onSnapshot(collection(db, 'incentivePayments'), (snap) => {
+          const paymentQuery = isUserPrivileged
+            ? query(collection(db, 'incentivePayments'), limit(100))
+            : query(collection(db, 'incentivePayments'), where('employeeId', '==', employeeId || 'none'), limit(50));
+
+          const unsubIncentivePayments = onSnapshot(paymentQuery, (snap) => {
             const pays = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as IncentivePayment));
             setIncentivePayments(pays);
           }, (err) => {
             console.error("Incentive payments listener error:", err);
-            if (auth.currentUser) handleFirestoreError(err, OperationType.GET, 'incentivePayments');
+            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
+              handleFirestoreError(err, OperationType.GET, 'incentivePayments');
+            }
           });
           unsubsRef.current.push(unsubIncentivePayments);
 
@@ -1923,20 +2037,25 @@ export default function App() {
             setPagePasswords(passwords);
           }, (err) => {
             console.error("Page passwords listener error:", err);
-            handleFirestoreError(err, OperationType.GET, 'pagePasswords');
+            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
+              handleFirestoreError(err, OperationType.GET, 'pagePasswords');
+            }
           });
           unsubsRef.current.push(unsubPagePasswords);
 
-          // Listen for Matrix Reports - Limit to last 30 days
-          const thirtyDaysAgo = subDays(new Date(), 30).toISOString().split('T')[0];
-          const matrixQuery = query(collection(db, 'matrixReports'), where('date', '>=', thirtyDaysAgo));
+          // Listen for Matrix Reports - Limit to last 14 days to save quota
+          const matrixDaysAgo = subDays(new Date(), 14).toISOString().split('T')[0];
+          const matrixQuery = query(collection(db, 'matrixReports'), where('date', '>=', matrixDaysAgo), limit(200));
           
           const unsubMatrix = onSnapshot(matrixQuery, (snap) => {
             const reports = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as MatrixReport));
             setMatrixReports(reports);
           }, (err) => {
             console.error("Matrix reports listener error:", err);
-            if (auth.currentUser) handleFirestoreError(err, OperationType.GET, 'matrixReports');
+            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
+              setFatalError(err);
+              handleFirestoreError(err, OperationType.GET, 'matrixReports');
+            }
           });
           unsubsRef.current.push(unsubMatrix);
 
@@ -1949,7 +2068,14 @@ export default function App() {
         }
       } catch (err) {
         console.error("Auth sync error:", err);
-        setFatalError(err);
+        const errorString = err instanceof Error ? err.message : String(err);
+        if (errorString.includes('Quota exceeded') || errorString.includes('quota limit exceeded')) {
+          setFatalError({
+            message: "Firestore daily quota exceeded. The free tier limit has been reached for today. The quota will reset tomorrow. You can check detailed quota info at https://firebase.google.com/pricing#cloud-firestore"
+          });
+        } else {
+          setFatalError(err);
+        }
       } finally {
         console.log("Auth sync finally block, setting loading to false");
         setIsLoading(false);
@@ -2519,7 +2645,15 @@ export default function App() {
 
   const confirmDelete = async () => {
     if (!deleteConfirmation) return;
-    const { id, type } = deleteConfirmation;
+    const { id, type, passwordInput } = deleteConfirmation;
+
+    const deleteConfig = pagePasswords['globalDelete'] || { password: '', isOpen: false };
+    if (!deleteConfig.isOpen) {
+      if (passwordInput !== deleteConfig.password) {
+        setDeleteConfirmation(prev => prev ? { ...prev, error: 'Incorrect password' } : null);
+        return;
+      }
+    }
     
     if (type === 'trainingMaterials' && !hasPermission('training')) return;
     if (type !== 'trainingMaterials' && !isAdmin) return;
@@ -2670,14 +2804,51 @@ export default function App() {
         throw new Error("User profile not loaded. Please refresh.");
       }
       const currentEmp = employees.find(e => e.email?.toLowerCase() === profile?.email?.toLowerCase());
+      const employeeId = matrixForm.employeeId || currentEmp?.id || '';
+      const employeeName = matrixForm.employeeName || currentEmp?.name || '';
       
-      if ((isAdmin || isBDEUser) && !matrixForm.employeeId && !matrixEditId) {
+      if ((isAdmin || isBDEUser) && !employeeId && !matrixEditId) {
         throw new Error("Please select an agent.");
       }
 
-      if (!currentEmp && !isAdmin && !isBDEUser) {
+      if (!employeeId && !isAdmin && !isBDEUser) {
         throw new Error("Only employees or authorized users can submit matrix reports.");
       }
+
+      // Check for duplicate report for the same date and employee
+      const existingReport = matrixReports.find(r => 
+        r.employeeId === employeeId && 
+        r.date === matrixForm.date && 
+        r.id !== matrixEditId
+      );
+      if (existingReport) {
+        throw new Error(`A report for ${employeeName} on ${matrixForm.date} already exists.`);
+      }
+
+      // Validate all fields are compulsory
+      if (!matrixForm.date || !matrixForm.totalTalktime || !matrixForm.loginTime || !matrixForm.logoutTime || !matrixForm.breakTime) {
+        throw new Error("All fields are compulsory. Please fill in all details.");
+      }
+
+      if (matrixForm.performancePoints === undefined || matrixForm.performancePoints === null || matrixForm.totalCalls === undefined || matrixForm.totalCalls === null) {
+        throw new Error("Performance Points and Total Calls are compulsory.");
+      }
+
+      // Validate Top 4 Talktimes
+      if (!matrixForm.topTalktimes || matrixForm.topTalktimes.length < 4) {
+        throw new Error("Please provide all 4 top talktimes.");
+      }
+
+      const phoneRegex = /^\d{10}$/;
+      matrixForm.topTalktimes.forEach((t, idx) => {
+        const phoneNo = t.phoneNo?.trim() || '';
+        if (!t.tripId || !phoneNo || !t.talktime) {
+          throw new Error(`Top Talktime #${idx + 1} is incomplete. All fields are compulsory.`);
+        }
+        if (!phoneRegex.test(phoneNo)) {
+          throw new Error(`Top Talktime #${idx + 1} phone number must be exactly 10 digits.`);
+        }
+      });
 
       // Enforce 3-day limit for submission and editing
       if (!isAdmin) {
@@ -2692,8 +2863,8 @@ export default function App() {
 
       const reportData = {
         ...matrixForm,
-        employeeId: matrixForm.employeeId || currentEmp?.id || '',
-        employeeName: matrixForm.employeeName || currentEmp?.name || '',
+        employeeId,
+        employeeName,
         updatedBy: profile?.email || 'Unknown',
         updatedByName: profile?.displayName || 'Unknown',
         updatedAt: serverTimestamp(),
@@ -2884,6 +3055,17 @@ export default function App() {
     return [...weeks].sort((a, b) => a.startDate.localeCompare(b.startDate));
   }, [weeks]);
 
+  const missingWeeksFromSales = useMemo(() => {
+    const configuredWeekNames = new Set(weeks.map(w => w.weekName));
+    const missing = new Set<string>();
+    sales.forEach(s => {
+      if (s.week && !configuredWeekNames.has(s.week)) {
+        missing.add(s.week);
+      }
+    });
+    return Array.from(missing);
+  }, [weeks, sales]);
+
   const lastTwoWeeksNames = useMemo(() => {
     return allSortedWeeks.slice(-2).map(w => w.weekName);
   }, [allSortedWeeks]);
@@ -2892,7 +3074,7 @@ export default function App() {
   const lastWeekName = lastTwoWeeksNames[0];
 
   const sortedWeeks = useMemo(() => {
-    return allSortedWeeks.slice(-12);
+    return allSortedWeeks.slice(-24);
   }, [allSortedWeeks]);
 
   useEffect(() => {
@@ -2921,6 +3103,20 @@ export default function App() {
     }
   }, [allMonths, hasSetDefaultStatsMonth]);
 
+  const getSaleMonth = useCallback((sale: Sales, weeksList: Week[]) => {
+    const saleWeekObj = weeksList.find(w => w.weekName === sale.week);
+    if (saleWeekObj?.month) return saleWeekObj.month;
+    
+    if (!sale.week) return null;
+    const lowerWeek = sale.week.toLowerCase();
+    const months = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+    const foundMonth = months.find(m => lowerWeek.includes(m) || lowerWeek.includes(m.substring(0, 3)));
+    if (foundMonth) {
+      return foundMonth.charAt(0).toUpperCase() + foundMonth.slice(1);
+    }
+    return null;
+  }, []);
+
   const filteredSales = useMemo(() => {
     const level = getPermissionLevel('sales');
     if (level === 'None') return [];
@@ -2943,8 +3139,8 @@ export default function App() {
         sale.salesBy === salesByFilter;
       
       // Find the month for the sale's week
-      const saleWeekObj = weeks.find(w => w.weekName === sale.week);
-      const matchesMonth = !salesMonthFilter || (saleWeekObj && saleWeekObj.month === salesMonthFilter);
+      const saleMonth = getSaleMonth(sale, weeks);
+      const matchesMonth = !salesMonthFilter || (saleMonth === salesMonthFilter);
       
       const matchesSearch = !salesSearchQuery || 
         sale.guestName?.toLowerCase().includes(salesSearchQuery.toLowerCase()) ||
@@ -3152,12 +3348,41 @@ export default function App() {
   }, [filteredSales]);
 
   if (fatalError) {
+    let message = fatalError.message || "An unexpected error occurred. Please try refreshing the page.";
+    let isQuotaError = false;
+    
+    try {
+      const errorString = typeof fatalError === 'string' ? fatalError : (fatalError.message || String(fatalError));
+      if (errorString.includes('Quota exceeded') || errorString.includes('quota limit exceeded')) {
+        isQuotaError = true;
+        message = "Firestore daily quota exceeded. The free tier limit has been reached for today. The quota will reset tomorrow. You can check detailed quota info at https://firebase.google.com/pricing#cloud-firestore";
+      } else if (message.startsWith('{')) {
+        const errObj = JSON.parse(message);
+        if (errObj.error) {
+          if (errObj.error.includes('Quota exceeded')) {
+            isQuotaError = true;
+            message = "Firestore daily quota exceeded. The free tier limit has been reached for today. The quota will reset tomorrow.";
+          } else {
+            message = `Firestore Error: ${errObj.error}`;
+          }
+        }
+      }
+    } catch (e) {
+      // Not a JSON string, keep original message
+    }
+
     return (
       <div className="min-h-screen bg-zinc-50 flex flex-col items-center justify-center p-4 text-center">
-        <AlertCircle className="w-12 h-12 text-red-600 mb-4" />
-        <h1 className="text-2xl font-bold text-zinc-900 mb-2">Application Error</h1>
-        <p className="text-zinc-600 mb-6 max-w-md">{fatalError.message || "An unexpected error occurred. Please try refreshing the page."}</p>
-        <Button onClick={() => window.location.reload()}>Refresh Page</Button>
+        <div className={cn("p-3 rounded-full mb-4", isQuotaError ? "bg-orange-100" : "bg-red-100")}>
+          <AlertCircle className={cn("w-12 h-12", isQuotaError ? "text-orange-600" : "text-red-600")} />
+        </div>
+        <h1 className="text-2xl font-bold text-zinc-900 mb-2">
+          {isQuotaError ? "Quota Limit Reached" : "Application Error"}
+        </h1>
+        <p className="text-zinc-600 mb-6 max-w-md whitespace-pre-wrap">{message}</p>
+        <Button onClick={() => window.location.reload()} className={isQuotaError ? "bg-orange-600 hover:bg-orange-700" : ""}>
+          Refresh Page
+        </Button>
       </div>
     );
   }
@@ -4713,6 +4938,8 @@ export default function App() {
                   employeeId: !isAdmin && !isBDEUser ? currentEmployee?.id : '',
                   employeeName: !isAdmin && !isBDEUser ? currentEmployee?.name : '',
                 });
+                setError(null);
+                setSuccess(null);
                 setIsMatrixModalOpen(true);
               }} className="bg-orange-600">
                 <Plus className="w-4 h-4" />
@@ -5156,6 +5383,13 @@ export default function App() {
                 </div>
               )}
 
+              {!isAdmin && !isBDEUser && !currentEmployee && (
+                <div className="p-3 bg-amber-50 border border-amber-100 rounded-xl flex items-center gap-2 text-amber-600 text-xs">
+                  <AlertCircle className="w-4 h-4" />
+                  Warning: Your profile is not linked to an employee record. Please contact Admin.
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-zinc-500 uppercase">Date</label>
@@ -5216,32 +5450,35 @@ export default function App() {
                       <span className="text-xs font-bold text-zinc-400 w-4">{idx + 1}.</span>
                       <input
                         type="text"
+                        required
                         placeholder="Trip ID"
                         className="flex-1 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg focus:ring-2 focus:ring-orange-500 outline-none text-xs"
                         value={t.tripId}
                         onChange={(e) => {
                           const newTops = [...(matrixForm.topTalktimes || [])];
-                          newTops[idx].tripId = e.target.value;
+                          newTops[idx] = { ...newTops[idx], tripId: e.target.value };
                           setMatrixForm({ ...matrixForm, topTalktimes: newTops });
                         }}
                       />
                       <input
                         type="text"
+                        required
                         placeholder="Phone No"
                         className="flex-1 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg focus:ring-2 focus:ring-orange-500 outline-none text-xs"
                         value={t.phoneNo}
                         onChange={(e) => {
                           const newTops = [...(matrixForm.topTalktimes || [])];
-                          newTops[idx].phoneNo = e.target.value;
+                          newTops[idx] = { ...newTops[idx], phoneNo: e.target.value };
                           setMatrixForm({ ...matrixForm, topTalktimes: newTops });
                         }}
                       />
                       <select
+                        required
                         className="w-24 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg focus:ring-2 focus:ring-orange-500 outline-none text-xs"
                         value={t.talktime}
                         onChange={(e) => {
                           const newTops = [...(matrixForm.topTalktimes || [])];
-                          newTops[idx].talktime = e.target.value;
+                          newTops[idx] = { ...newTops[idx], talktime: e.target.value };
                           setMatrixForm({ ...matrixForm, topTalktimes: newTops });
                         }}
                       >
@@ -5292,6 +5529,20 @@ export default function App() {
                 </div>
               </div>
 
+              {error && (
+                <div className="p-3 bg-red-50 border border-red-100 rounded-xl flex items-center gap-2 text-red-600 text-xs">
+                  <AlertCircle className="w-4 h-4" />
+                  {error}
+                </div>
+              )}
+
+              {success && (
+                <div className="p-3 bg-green-50 border border-green-100 rounded-xl flex items-center gap-2 text-green-600 text-xs">
+                  <CheckCircle2 className="w-4 h-4" />
+                  {success}
+                </div>
+              )}
+
               <div className="flex gap-3 pt-4">
                 <Button type="submit" className="flex-1" isLoading={isSavingMatrix}>
                   {matrixEditId ? "Update Report" : "Submit Report"}
@@ -5319,6 +5570,73 @@ export default function App() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {/* Global Delete Password */}
+            {(() => {
+              const config = pagePasswords['globalDelete'] || { password: '', isOpen: false };
+              return (
+                <Card className="p-6 space-y-4 border-red-100 bg-red-50/30">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="p-1.5 bg-red-100 rounded-lg">
+                        <Trash2 className="w-4 h-4 text-red-600" />
+                      </div>
+                      <h3 className="font-bold text-zinc-900">Delete Protection</h3>
+                    </div>
+                    <div className={cn(
+                      "px-2 py-1 rounded-full text-[10px] font-bold uppercase",
+                      config.isOpen ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"
+                    )}>
+                      {config.isOpen ? 'No Password' : 'Password Required'}
+                    </div>
+                  </div>
+
+                  <p className="text-[10px] text-zinc-500 font-medium leading-relaxed">
+                    When enabled, a password will be required for all delete operations across the application.
+                  </p>
+
+                  <div className="flex items-center gap-4">
+                    <button
+                      onClick={() => handleUpdatePagePassword('globalDelete', config.password, true)}
+                      className={cn(
+                        "flex-1 py-2 text-xs font-bold rounded-lg transition-colors",
+                        config.isOpen ? "bg-red-600 text-white" : "bg-white border border-zinc-200 text-zinc-600 hover:bg-zinc-50"
+                      )}
+                    >
+                      Disable
+                    </button>
+                    <button
+                      onClick={() => handleUpdatePagePassword('globalDelete', config.password, false)}
+                      className={cn(
+                        "flex-1 py-2 text-xs font-bold rounded-lg transition-colors",
+                        !config.isOpen ? "bg-red-600 text-white" : "bg-white border border-zinc-200 text-zinc-600 hover:bg-zinc-50"
+                      )}
+                    >
+                      Enable
+                    </button>
+                  </div>
+
+                  {!config.isOpen && (
+                    <div className="space-y-2 pt-2 border-t border-red-100">
+                      <label className="text-[10px] font-bold text-red-600 uppercase">Delete Password</label>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          className="flex-1 px-3 py-1.5 bg-white border border-red-200 rounded-lg text-sm focus:ring-2 focus:ring-red-500 outline-none"
+                          placeholder="Set delete password"
+                          defaultValue={config.password}
+                          onBlur={(e) => {
+                            if (e.target.value !== config.password) {
+                              handleUpdatePagePassword('globalDelete', e.target.value, false);
+                            }
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </Card>
+              );
+            })()}
+
             {allPermissions.map((page) => {
               const config = pagePasswords[page.id] || { password: '', isOpen: true };
               return (
@@ -6146,6 +6464,46 @@ export default function App() {
                   </tbody>
                 </table>
               </Card>
+
+              {missingWeeksFromSales.length > 0 && (
+                <div className="mt-8 space-y-4">
+                  <div className="flex items-center gap-2 text-red-600">
+                    <AlertCircle className="w-5 h-5" />
+                    <h3 className="text-lg font-bold">Data Integrity Alert: Missing Week Configurations</h3>
+                  </div>
+                  <p className="text-sm text-zinc-600">
+                    The following weeks are referenced in Sales records but are not configured in the Week Master. 
+                    This causes sales for these weeks to be hidden in filtered views.
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {missingWeeksFromSales.map(weekName => (
+                      <Card key={weekName} className="p-4 border-red-100 bg-red-50/30 flex items-center justify-between">
+                        <div>
+                          <p className="text-sm font-bold text-zinc-900">{weekName}</p>
+                          <p className="text-xs text-zinc-500">Used in {sales.filter(s => s.week === weekName).length} sales</p>
+                        </div>
+                        <Button 
+                          size="sm"
+                          variant="outline"
+                          className="text-xs border-red-200 hover:bg-red-50 text-red-600"
+                          onClick={() => {
+                            setIsEditingWeek(false);
+                            setWeekForm({
+                              weekName: weekName,
+                              month: 'February', // Default to Feb as per user request context
+                              startDate: '',
+                              endDate: ''
+                            });
+                            setIsWeekModalOpen(true);
+                          }}
+                        >
+                          Configure Now
+                        </Button>
+                      </Card>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -6634,8 +6992,8 @@ export default function App() {
                         week: '',
                         date: new Date().toISOString().split('T')[0],
                         guestName: '',
-                        agent: profile?.role === 'Agent' ? profile?.displayName || '' : '',
-                        agentEmail: profile?.role === 'Agent' ? profile?.email || '' : '',
+                        agent: isAgent ? profile?.displayName || '' : '',
+                        agentEmail: isAgent ? profile?.email || '' : '',
                         agentPercentage: 100,
                         bde: profile?.role === 'BDE' ? profile?.displayName || '' : '',
                         bdeEmail: profile?.role === 'BDE' ? profile?.email || '' : '',
@@ -6720,7 +7078,7 @@ export default function App() {
                     <label className="text-xs font-bold text-zinc-500 uppercase">Agent</label>
                     <SearchableSelect
                       required
-                      disabled={profile?.role === 'Agent' && !isAdmin}
+                      disabled={isAgent && !isAdmin}
                       options={[
                         { value: '', label: 'Select Agent' },
                         ...employees
@@ -10418,8 +10776,8 @@ export default function App() {
                 const matchesStatus = statsOverviewStatusFilter === 'All' || sale.advanceCN === statsOverviewStatusFilter;
                 const matchesWeek = statsOverviewWeekFilter === 'All' || sale.week === statsOverviewWeekFilter;
                 
-                const saleWeekData = weeks.find(w => w.weekName === sale.week);
-                const matchesMonth = statsOverviewMonthFilter === 'All' || (saleWeekData && saleWeekData.month === statsOverviewMonthFilter);
+                const saleMonth = getSaleMonth(sale, weeks);
+                const matchesMonth = statsOverviewMonthFilter === 'All' || (saleMonth === statsOverviewMonthFilter);
                 
                 return matchesSource && matchesStatus && matchesWeek && matchesMonth;
               });
@@ -10735,8 +11093,8 @@ export default function App() {
                     frameSales = salesInRange.filter(s => s.bde === frame);
                   } else if (statsOverviewPackageAnalysisDimension === 'Monthly') {
                     frameSales = salesInRange.filter(s => {
-                      const weekData = weeks.find(w => w.weekName === s.week);
-                      return weekData && weekData.month === frame;
+                      const saleMonth = getSaleMonth(s, weeks);
+                      return saleMonth === frame;
                     });
                   } else if (statsOverviewPackageAnalysisDimension === 'Weekly') {
                     frameSales = salesInRange.filter(s => s.week === frame);
@@ -12987,6 +13345,22 @@ export default function App() {
             </div>
           </div>
 
+          {!(pagePasswords['globalDelete']?.isOpen ?? false) && (
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-zinc-500 uppercase">Enter Delete Password to Confirm</label>
+              <input
+                type="password"
+                className="w-full px-4 py-2 bg-zinc-50 border border-zinc-200 rounded-lg focus:ring-2 focus:ring-red-500 outline-none"
+                placeholder="Password"
+                value={deleteConfirmation?.passwordInput || ''}
+                onChange={(e) => setDeleteConfirmation(prev => prev ? { ...prev, passwordInput: e.target.value } : null)}
+                onKeyDown={(e) => e.key === 'Enter' && confirmDelete()}
+                autoFocus
+              />
+              {deleteConfirmation?.error && <p className="text-xs text-red-600 font-medium">{deleteConfirmation.error}</p>}
+            </div>
+          )}
+
           <div className="flex gap-3 pt-4">
             <Button 
               onClick={confirmDelete}
@@ -13184,6 +13558,7 @@ export default function App() {
                     </thead>
                     <tbody>
                       {(() => {
+                        const employee = employees.find(e => e.id === agentLedgerModal.employeeId);
                         const empIncentives = incentives
                           .filter(i => i.employeeId === agentLedgerModal.employeeId)
                           .map(i => ({ ...i, entryType: 'due' as const }));
@@ -13191,7 +13566,27 @@ export default function App() {
                           .filter(p => p.employeeId === agentLedgerModal.employeeId)
                           .map(p => ({ ...p, entryType: 'paid' as const }));
                         
-                        const allEntries = [...empIncentives, ...empPayments].sort((a, b) => 
+                        // Find sales for this employee
+                        const empSales = !employee ? [] : sales.filter(s => {
+                          const isAgent = (s.agentEmail?.toLowerCase() === employee.email?.toLowerCase()) || 
+                                          (s.agent?.toLowerCase().trim() === employee.name.toLowerCase().trim());
+                          const isAssocBDE = (s.associateBdeEmail?.toLowerCase() === employee.email?.toLowerCase()) || 
+                                             (s.associateBde?.toLowerCase().trim() === employee.name.toLowerCase().trim());
+                          return isAgent || isAssocBDE;
+                        }).map(s => ({
+                          id: s.id,
+                          date: s.date,
+                          type: `Sale: ${s.guestName} (${s.tripId})`,
+                          amount: getAgentCreditForSale(s, employee, 'packageValue'),
+                          remarks: `Destination: ${s.destination}, Status: ${s.advanceCN}`,
+                          recordedBy: 'System',
+                          recordedAt: s.createdAt ? (s.createdAt as any).toDate?.().toLocaleString() : '',
+                          entryType: 'due' as const,
+                          isPaid: false,
+                          isEligible: true // Sales are generally eligible for incentive tracking
+                        }));
+
+                        const allEntries = [...empIncentives, ...empPayments, ...empSales].sort((a, b) => 
                           new Date(a.date).getTime() - new Date(b.date).getTime()
                         );
 

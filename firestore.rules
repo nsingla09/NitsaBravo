@@ -107,7 +107,20 @@ service cloud.firestore {
     }
 
     function isPrivileged() {
-      return isAdmin() || isManager() || isTrainer() || isBDE() || hasPermission('trainingOverview') || hasPermission('issueOverview');
+      return isAdmin() || isManager() || isTrainer() || isBDE() || 
+             (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent').lower() == 'sales agent') ||
+             hasCompletePermission('sales') || hasCompletePermission('agentOverview') ||
+             hasPermission('trainingOverview') || hasPermission('issueOverview');
+    }
+
+    function hasCompletePermission(permission) {
+      return isAdmin() || (
+        isAuthenticated() && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', {}) is map &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', {})[permission] == 'Complete'
+      );
     }
 
     function hasPermission(permission) {
@@ -223,9 +236,15 @@ service cloud.firestore {
              data.totalCalls is number &&
              data.totalTalktime is string &&
              data.topTalktimes is list &&
+             data.topTalktimes.size() == 4 &&
              data.loginTime is string &&
              data.logoutTime is string &&
              data.breakTime is string &&
+             // Validate each top talktime
+             data.topTalktimes[0].tripId is string && data.topTalktimes[0].phoneNo.matches("^\\d{10}$") && data.topTalktimes[0].talktime is string &&
+             data.topTalktimes[1].tripId is string && data.topTalktimes[1].phoneNo.matches("^\\d{10}$") && data.topTalktimes[1].talktime is string &&
+             data.topTalktimes[2].tripId is string && data.topTalktimes[2].phoneNo.matches("^\\d{10}$") && data.topTalktimes[2].talktime is string &&
+             data.topTalktimes[3].tripId is string && data.topTalktimes[3].phoneNo.matches("^\\d{10}$") && data.topTalktimes[3].talktime is string &&
              (!('createdBy' in data) || data.createdBy is string) &&
              (!('createdByName' in data) || data.createdByName is string) &&
              (!('updatedBy' in data) || data.updatedBy is string) &&
@@ -332,8 +351,8 @@ service cloud.firestore {
 
     match /incentives/{incentiveId} {
       allow read: if isAuthenticated() && (
+        isPrivileged() || 
         hasPermission('incentiveMaster') || 
-        isAdmin() || 
         (exists(/databases/$(database)/documents/employees/$(resource.data.employeeId)) && 
          get(/databases/$(database)/documents/employees/$(resource.data.employeeId)).data.get('email', '') == request.auth.token.email)
       );
@@ -343,8 +362,8 @@ service cloud.firestore {
 
     match /incentivePayments/{paymentId} {
       allow read: if isAuthenticated() && (
+        isPrivileged() || 
         hasPermission('incentiveMaster') || 
-        isAdmin() || 
         (exists(/databases/$(database)/documents/employees/$(resource.data.employeeId)) && 
          get(/databases/$(database)/documents/employees/$(resource.data.employeeId)).data.get('email', '') == request.auth.token.email)
       );
