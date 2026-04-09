@@ -9,6 +9,9 @@
         "email": { "type": "string", "format": "email", "description": "The user's email address" },
         "displayName": { "type": "string", "description": "The user's display name" },
         "photoURL": { "type": "string", "description": "The user's photo URL" },
+        "role": { "type": "string", "description": "User role (e.g., Admin, Agent)" },
+        "employeeId": { "type": "string", "description": "Linked employee document ID" },
+        "bdeName": { "type": "string", "description": "Denormalized BDE name for quick access" },
         "pointsBalance": { "type": "number", "description": "The current balance of Bravo points" },
         "lastReadRemarks": { "type": "object", "description": "Map of saleId to remarksCount last read by user" }
       },
@@ -36,6 +39,8 @@
       "properties": {
         "employeeCode": { "type": "string", "description": "Auto-generated employee code" },
         "name": { "type": "string", "description": "Employee name" },
+        "email": { "type": "string", "format": "email", "description": "Employee email address" },
+        "userId": { "type": "string", "description": "Linked user document UID" },
         "target": { "type": "number", "description": "Target amount" },
         "position": { "type": "string", "description": "Employee position" },
         "joiningDate": { "type": "string", "format": "date", "description": "Joining date" },
@@ -89,9 +94,12 @@
         "guestName": { "type": "string", "description": "Name of the guest" },
         "agent": { "type": "string", "description": "Agent name" },
         "agentEmail": { "type": "string", "format": "email", "description": "Agent email" },
+        "agentPhotoURL": { "type": "string", "description": "Denormalized agent photo URL" },
         "agentPercentage": { "type": "number", "description": "Percentage for Agent" },
         "bde": { "type": "string", "description": "BDE name" },
+        "bdeEmail": { "type": "string", "format": "email", "description": "Denormalized BDE email" },
         "associateBde": { "type": "string", "description": "Associate BDE name" },
+        "associateBdeEmail": { "type": "string", "format": "email", "description": "Denormalized Associate BDE email" },
         "assocBdePercentage": { "type": "number", "description": "Percentage for Associate BDE" },
         "destination": { "type": "string", "description": "Destination" },
         "tripId": { "type": "string", "description": "Trip ID" },
@@ -252,6 +260,30 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["employeeId", "employeeName", "date", "performancePoints", "totalCalls", "totalTalktime", "loginTime", "logoutTime", "breakTime"]
+    },
+    "SalesSummary": {
+      "title": "SalesSummary",
+      "description": "Precomputed sales aggregation summary",
+      "type": "object",
+      "properties": {
+        "totalRevenue": { "type": "number", "description": "Total package value" },
+        "totalSalesCount": { "type": "number", "description": "Total number of sales" },
+        "totalPoints": { "type": "number", "description": "Total points (if applicable)" },
+        "statusCounts": { 
+          "type": "object", 
+          "description": "Breakdown of counts by status (Advance, CN, Confirmed, Cancel)" 
+        },
+        "statusValues": { 
+          "type": "object", 
+          "description": "Breakdown of values by status" 
+        },
+        "type": { "type": "string", "enum": ["daily", "weekly", "monthly", "lifetime"], "description": "Summary period type" },
+        "scope": { "type": "string", "enum": ["global", "bde", "agent"], "description": "Summary scope" },
+        "scopeId": { "type": "string", "description": "BDE name, Agent Name, or 'global'" },
+        "periodId": { "type": "string", "description": "Date, Week Name, or Month Name" },
+        "lastUpdatedAt": { "type": "string", "format": "date-time", "description": "Last update timestamp" }
+      },
+      "required": ["totalRevenue", "totalSalesCount", "type", "scope", "scopeId", "periodId", "lastUpdatedAt"]
     }
   },
   "firestore": {
@@ -310,6 +342,10 @@
     "/matrixReports/{reportId}": {
       "schema": "MatrixReport",
       "description": "Daily performance matrix reports"
+    },
+    "/salesSummaries/{summaryId}": {
+      "schema": "SalesSummary",
+      "description": "Precomputed sales summaries for dashboard"
     }
   }
 }

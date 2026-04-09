@@ -5,6 +5,7 @@
 
 import { useState, useEffect, useMemo, useCallback, Component, useRef } from 'react';
 import React from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import * as XLSX from 'xlsx';
 import { 
   auth, 
@@ -28,6 +29,8 @@ import {
   addDoc, 
   serverTimestamp,
   runTransaction,
+  loadBundle,
+  namedQuery,
   handleFirestoreError,
   OperationType,
   or,
@@ -43,6 +46,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, 
   PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, LabelList
 } from 'recharts';
+import { backfillSalesSummaries } from './scripts/backfillSalesSummaries';
 import { 
   Trophy, 
   Send, 
@@ -84,7 +88,8 @@ import {
   LayoutGrid,
   Lock,
   PhoneCall,
-  Database
+  Database,
+  RefreshCw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { formatDistanceToNow, format, subDays } from 'date-fns';
@@ -913,6 +918,102 @@ export default function App() {
   const menuRef = useRef<HTMLDivElement>(null);
   const lastUserRef = useRef<any>(null);
 
+  // Query for Employees
+  const { data: employeesData, refetch: refetchEmployees } = useQuery({
+    queryKey: ['employees', user?.uid, isPrivileged, profile?.bdeName],
+    queryFn: async () => {
+      if (!user) return [];
+      const employeeFilters = [where('email', '==', user.email || '')];
+      if (profile?.bdeName) employeeFilters.push(where('bde', '==', profile.bdeName));
+
+      const employeesQuery = isPrivileged
+        ? query(collection(db, 'employees'), limit(200))
+        : (employeeFilters.length > 1 
+            ? query(collection(db, 'employees'), or(...employeeFilters), limit(50))
+            : query(collection(db, 'employees'), employeeFilters[0], limit(50)));
+      
+      const snap = await getDocs(employeesQuery);
+      return snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Employee));
+    },
+    enabled: !!user && !!profile,
+  });
+
+  useEffect(() => {
+    if (employeesData) setEmployees(employeesData);
+  }, [employeesData]);
+
+  // Query for Incentives
+  const { data: incentivesData, refetch: refetchIncentives } = useQuery({
+    queryKey: ['incentives', user?.uid, isPrivileged, profile?.uid],
+    queryFn: async () => {
+      if (!user) return [];
+      const incentiveQuery = isPrivileged
+        ? query(collection(db, 'incentives'), limit(100))
+        : query(collection(db, 'incentives'), where('employeeId', '==', user.uid), limit(50));
+      
+      const snap = await getDocs(incentiveQuery);
+      return snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Incentive));
+    },
+    enabled: !!user && !!profile,
+  });
+
+  useEffect(() => {
+    if (incentivesData) setIncentives(incentivesData);
+  }, [incentivesData]);
+
+  // Query for Incentive Payments
+  const { data: paymentsData, refetch: refetchPayments } = useQuery({
+    queryKey: ['incentivePayments', user?.uid, isPrivileged, profile?.uid],
+    queryFn: async () => {
+      if (!user) return [];
+      const paymentQuery = isPrivileged
+        ? query(collection(db, 'incentivePayments'), limit(100))
+        : query(collection(db, 'incentivePayments'), where('employeeId', '==', user.uid), limit(50));
+      
+      const snap = await getDocs(paymentQuery);
+      return snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as IncentivePayment));
+    },
+    enabled: !!user && !!profile,
+  });
+
+  useEffect(() => {
+    if (paymentsData) setIncentivePayments(paymentsData);
+  }, [paymentsData]);
+
+  // Query for Matrix Reports
+  const { data: matrixData, refetch: refetchMatrix } = useQuery({
+    queryKey: ['matrixReports', user?.uid, isPrivileged],
+    queryFn: async () => {
+      if (!user) return [];
+      const matrixDaysAgo = subDays(new Date(), 14).toISOString().split('T')[0];
+      const matrixQuery = query(collection(db, 'matrixReports'), where('date', '>=', matrixDaysAgo), limit(200));
+      
+      const snap = await getDocs(matrixQuery);
+      return snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as MatrixReport));
+    },
+    enabled: !!user && !!profile,
+  });
+
+  useEffect(() => {
+    if (matrixData) setMatrixReports(matrixData);
+  }, [matrixData]);
+
+  const refreshAllData = async () => {
+    setIsRefreshingStatic(true);
+    try {
+      await Promise.all([
+        refreshStaticData(),
+        refetchEmployees(),
+        refetchIncentives(),
+        refetchPayments(),
+        refetchMatrix(),
+        queryClient.invalidateQueries({ queryKey: ['sales'] })
+      ]);
+    } finally {
+      setIsRefreshingStatic(false);
+    }
+  };
+
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
@@ -1299,6 +1400,78 @@ export default function App() {
   } | null>(null);
   const unsubsRef = useRef<(() => void)[]>([]);
   const hasRedirectedRef = useRef(false);
+
+  const [isRefreshingStatic, setIsRefreshingStatic] = useState(false);
+  const queryClient = useQueryClient();
+
+  const refreshStaticData = async () => {
+    if (isRefreshingStatic) return;
+    setIsRefreshingStatic(true);
+    try {
+      // Try loading Data Bundle with cache busting
+      const response = await fetch(`/api/bundle?t=${Date.now()}`);
+      if (response.ok) {
+        const bundleData = await response.arrayBuffer();
+        await loadBundle(db, bundleData);
+        
+        const rolesSnap = await getDocs(await namedQuery(db, 'roles-query'));
+        setRoles(rolesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Role)));
+        
+        const trainingSnap = await getDocs(await namedQuery(db, 'training-query'));
+        setTrainingMaterials(trainingSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as TrainingMaterial)));
+        
+        const weeksSnap = await getDocs(await namedQuery(db, 'weeks-query'));
+        setWeeks(weeksSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Week)));
+        
+        const bdesSnap = await getDocs(await namedQuery(db, 'bdes-query'));
+        setBDES(bdesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as BDE)));
+        
+        const passwordsSnap = await getDocs(await namedQuery(db, 'passwords-query'));
+        const passwords: Record<string, { password: string, isOpen: boolean }> = {};
+        passwordsSnap.docs.forEach(doc => {
+          passwords[doc.id] = doc.data() as { password: string, isOpen: boolean };
+        });
+        setPagePasswords(passwords);
+        
+        console.log("Static data refreshed successfully from Data Bundle");
+        return;
+      }
+    } catch (err) {
+      console.warn("Failed to refresh via bundle, falling back to direct reads:", err);
+    }
+
+    try {
+      // Fallback: Fetch Roles
+      const rolesSnap = await getDocs(query(collection(db, 'roles'), limit(50)));
+      setRoles(rolesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Role)));
+
+      // Fetch Training Materials
+      const trainingSnap = await getDocs(query(collection(db, 'trainingMaterials'), limit(100)));
+      setTrainingMaterials(trainingSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as TrainingMaterial)));
+
+      // Fetch Weeks
+      const weeksSnap = await getDocs(query(collection(db, 'weeks'), limit(100)));
+      setWeeks(weeksSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Week)));
+
+      // Fetch BDEs
+      const bdesSnap = await getDocs(query(collection(db, 'bdes'), limit(100)));
+      setBDES(bdesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as BDE)));
+
+      // Fetch Page Passwords
+      const passwordsSnap = await getDocs(collection(db, 'pagePasswords'));
+      const passwords: Record<string, { password: string, isOpen: boolean }> = {};
+      passwordsSnap.docs.forEach(doc => {
+        passwords[doc.id] = doc.data() as { password: string, isOpen: boolean };
+      });
+      setPagePasswords(passwords);
+
+      console.log("Static data refreshed successfully");
+    } catch (err) {
+      console.error("Error refreshing static data:", err);
+    } finally {
+      setIsRefreshingStatic(false);
+    }
+  };
 
   const cleanupListeners = () => {
     unsubsRef.current.forEach(unsub => {
@@ -1825,43 +1998,104 @@ export default function App() {
           });
           unsubsRef.current.push(unsubProfile);
 
-          // Listen for roles
-          const unsubRoles = onSnapshot(query(collection(db, 'roles'), limit(50)), (snap) => {
-            const rolesList = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Role));
-            setRoles(rolesList);
-            
-            // Initialize default roles if none exist
-            if (rolesList.length === 0 && isUserAdmin) {
-              console.log("Initializing default roles...");
-              const defaultRoles = [
-                { name: 'Admin', defaultPage: 'dashboard', permissions: Object.fromEntries(allPermissions.map(p => [p.id, 'Complete'])) },
-                { name: 'Manager', defaultPage: 'dashboard', permissions: Object.fromEntries(['dashboard', 'employees', 'weeks', 'bdes', 'sales', 'weeklyOverview', 'agentOverview', 'training', 'trainingOverview', 'issueOverview'].map(p => [p, 'Complete'])) },
-                { name: 'Trainer', defaultPage: 'training', permissions: Object.fromEntries(['dashboard', 'training', 'trainingOverview'].map(p => [p, 'Complete'])) },
-                { name: 'BDE', defaultPage: 'bdeOverview', permissions: Object.fromEntries(['dashboard', 'sales', 'agentOverview', 'bdeOverview', 'training'].map(p => [p, 'Complete'])) },
-                { name: 'Agent', defaultPage: 'dashboard', permissions: Object.fromEntries(['dashboard', 'sales', 'training', 'trainingOverview'].map(p => [p, 'Complete'])) },
-                { name: 'Operations', defaultPage: 'issueOverview', permissions: Object.fromEntries(['dashboard', 'issueOverview'].map(p => [p, 'Complete'])) },
-                { name: 'Extra Team', defaultPage: 'dashboard', permissions: Object.fromEntries(['dashboard', 'training', 'trainingOverview'].map(p => [p, 'Complete'])) },
-                { name: 'Trainee', defaultPage: 'training', permissions: Object.fromEntries(['dashboard', 'training', 'trainingOverview'].map(p => [p, 'Complete'])) },
-              ];
+          // One-time fetch for static/infrequently updated data
+          const fetchStaticData = async () => {
+            try {
+              // Try loading Data Bundle first to save read costs
+              const response = await fetch('/api/bundle');
+              if (response.ok) {
+                const bundleData = await response.arrayBuffer();
+                await loadBundle(db, bundleData);
+                
+                // Load from named queries in the bundle
+                const rolesSnap = await getDocs(await namedQuery(db, 'roles-query'));
+                setRoles(rolesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Role)));
+                
+                const trainingSnap = await getDocs(await namedQuery(db, 'training-query'));
+                setTrainingMaterials(trainingSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as TrainingMaterial)));
+                
+                const weeksSnap = await getDocs(await namedQuery(db, 'weeks-query'));
+                setWeeks(weeksSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Week)));
+                
+                const bdesSnap = await getDocs(await namedQuery(db, 'bdes-query'));
+                setBDES(bdesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as BDE)));
+                
+                const passwordsSnap = await getDocs(await namedQuery(db, 'passwords-query'));
+                const passwords: Record<string, { password: string, isOpen: boolean }> = {};
+                passwordsSnap.docs.forEach(doc => {
+                  passwords[doc.id] = doc.data() as { password: string, isOpen: boolean };
+                });
+                setPagePasswords(passwords);
+                
+                console.log("Static data loaded successfully from Data Bundle");
+                return; // Exit if bundle loaded successfully
+              }
+            } catch (err) {
+              console.warn("Failed to load Data Bundle, falling back to direct reads:", err);
+            }
+
+            try {
+              // Fallback: Fetch Roles
+              const rolesSnap = await getDocs(query(collection(db, 'roles'), limit(50)));
+              const rolesList = rolesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Role));
+              setRoles(rolesList);
               
-              defaultRoles.forEach(async (role) => {
-                try {
+              // Initialize default roles if none exist
+              if (rolesList.length === 0 && isUserAdmin) {
+                console.log("Initializing default roles...");
+                const defaultRoles = [
+                  { name: 'Admin', defaultPage: 'dashboard', permissions: Object.fromEntries(allPermissions.map(p => [p.id, 'Complete'])) },
+                  { name: 'Manager', defaultPage: 'dashboard', permissions: Object.fromEntries(['dashboard', 'employees', 'weeks', 'bdes', 'sales', 'weeklyOverview', 'agentOverview', 'training', 'trainingOverview', 'issueOverview'].map(p => [p, 'Complete'])) },
+                  { name: 'Trainer', defaultPage: 'training', permissions: Object.fromEntries(['dashboard', 'training', 'trainingOverview'].map(p => [p, 'Complete'])) },
+                  { name: 'BDE', defaultPage: 'bdeOverview', permissions: Object.fromEntries(['dashboard', 'sales', 'agentOverview', 'bdeOverview', 'training'].map(p => [p, 'Complete'])) },
+                  { name: 'Agent', defaultPage: 'dashboard', permissions: Object.fromEntries(['dashboard', 'sales', 'training', 'trainingOverview'].map(p => [p, 'Complete'])) },
+                  { name: 'Operations', defaultPage: 'issueOverview', permissions: Object.fromEntries(['dashboard', 'issueOverview'].map(p => [p, 'Complete'])) },
+                  { name: 'Extra Team', defaultPage: 'dashboard', permissions: Object.fromEntries(['dashboard', 'training', 'trainingOverview'].map(p => [p, 'Complete'])) },
+                  { name: 'Trainee', defaultPage: 'training', permissions: Object.fromEntries(['dashboard', 'training', 'trainingOverview'].map(p => [p, 'Complete'])) },
+                ];
+                
+                for (const role of defaultRoles) {
                   await addDoc(collection(db, 'roles'), {
                     ...role,
                     createdAt: serverTimestamp(),
                   });
-                } catch (err) {
-                  console.error("Error creating default role:", err);
                 }
+                const updatedRolesSnap = await getDocs(query(collection(db, 'roles'), limit(50)));
+                setRoles(updatedRolesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Role)));
+              }
+
+              // Fetch Training Materials
+              const trainingSnap = await getDocs(query(collection(db, 'trainingMaterials'), limit(100)));
+              setTrainingMaterials(trainingSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as TrainingMaterial)));
+
+              // Fetch Weeks
+              const weeksSnap = await getDocs(query(collection(db, 'weeks'), limit(100)));
+              setWeeks(weeksSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Week)));
+
+              // Fetch BDEs
+              const bdesSnap = await getDocs(query(collection(db, 'bdes'), limit(100)));
+              setBDES(bdesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as BDE)));
+
+              // Fetch All Users (for management)
+              if (isUserAdmin || isUserManager) {
+                const usersSnap = await getDocs(query(collection(db, 'users'), limit(100)));
+                setAllUsers(usersSnap.docs.map(doc => doc.data() as UserProfile));
+              }
+
+              // Fetch Page Passwords
+              const passwordsSnap = await getDocs(collection(db, 'pagePasswords'));
+              const passwords: Record<string, { password: string, isOpen: boolean }> = {};
+              passwordsSnap.docs.forEach(doc => {
+                passwords[doc.id] = doc.data() as { password: string, isOpen: boolean };
               });
+              setPagePasswords(passwords);
+
+            } catch (err) {
+              console.error("Error fetching static data:", err);
             }
-          }, (err) => {
-            console.error("Roles listener error:", err);
-            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
-              handleFirestoreError(err, OperationType.GET, 'roles');
-            }
-          });
-          unsubsRef.current.push(unsubRoles);
+          };
+
+          fetchStaticData();
 
           // Listen for leaderboard (Top 10)
           const leaderboardQuery = query(collection(db, 'users'), orderBy('pointsBalance', 'desc'), limit(10));
@@ -1872,24 +2106,6 @@ export default function App() {
             console.error("Leaderboard listener error:", err);
           });
           unsubsRef.current.push(unsubLeaderboard);
-
-          // Listen for all users - ONLY for privileged users - Limit to 100 to save quota
-          if (isUserAdmin || isUserManager) {
-            const unsubUsers = onSnapshot(query(collection(db, 'users'), limit(100)), (snap) => {
-              const users = snap.docs.map(doc => doc.data() as UserProfile);
-              setAllUsers(users);
-            }, (err) => {
-              console.error("Users listener error:", err);
-              if (err.message.includes('Quota exceeded') || err.message.includes('quota limit exceeded')) {
-                setIsQuotaExceeded(true);
-              }
-              if (auth.currentUser && !err.message.includes('Quota exceeded')) {
-                setFatalError(err);
-                handleFirestoreError(err, OperationType.GET, 'users');
-              }
-            });
-            unsubsRef.current.push(unsubUsers);
-          }
 
           // Listen for transactions
           const transQuery = isUserPrivileged 
@@ -1923,135 +2139,6 @@ export default function App() {
             }
           });
           unsubsRef.current.push(unsubTrans);
-
-          // Listen for Training Materials
-          const unsubTraining = onSnapshot(query(collection(db, 'trainingMaterials'), limit(100)), (snap) => {
-            const training = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as TrainingMaterial));
-            setTrainingMaterials(training);
-          }, (err) => {
-            console.error("Training materials listener error:", err);
-            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
-              setFatalError(err);
-              handleFirestoreError(err, OperationType.GET, 'trainingMaterials');
-            }
-          });
-          unsubsRef.current.push(unsubTraining);
-
-          // Listen for weeks
-          const unsubWeeks = onSnapshot(query(collection(db, 'weeks'), limit(100)), (snap) => {
-            const wks = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Week));
-            setWeeks(wks);
-          }, (err) => {
-            console.error("Weeks listener error:", err);
-            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
-              setFatalError(err);
-              handleFirestoreError(err, OperationType.GET, 'weeks');
-            }
-          });
-          unsubsRef.current.push(unsubWeeks);
-
-          // Listen for BDEs
-          const unsubBDEs = onSnapshot(query(collection(db, 'bdes'), limit(100)), (snap) => {
-            const bdeList = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as BDE));
-            setBDES(bdeList);
-          }, (err) => {
-            console.error("BDEs listener error:", err);
-            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
-              setFatalError(err);
-              handleFirestoreError(err, OperationType.GET, 'bdes');
-            }
-          });
-          unsubsRef.current.push(unsubBDEs);
-
-          // Listen for employees
-          const employeeFilters = [
-            where('email', '==', currentUser.email || '')
-          ];
-          
-          if (bdeName) {
-            employeeFilters.push(where('bde', '==', bdeName));
-          }
-
-          const employeesQuery = isUserPrivileged
-            ? query(collection(db, 'employees'), limit(200))
-            : (employeeFilters.length > 1 
-                ? query(collection(db, 'employees'), or(...employeeFilters), limit(50))
-                : query(collection(db, 'employees'), employeeFilters[0], limit(50)));
-
-          const unsubEmployees = onSnapshot(employeesQuery, (snap) => {
-            const emps = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Employee));
-            setEmployees(emps);
-          }, (err) => {
-            console.error("Employees listener error:", err);
-            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
-              setFatalError(err);
-              handleFirestoreError(err, OperationType.GET, 'employees');
-            }
-          });
-          unsubsRef.current.push(unsubEmployees);
-
-          // Listen for Incentives
-          const incentiveQuery = isUserPrivileged
-            ? query(collection(db, 'incentives'), limit(100))
-            : query(collection(db, 'incentives'), where('employeeId', '==', employeeId || 'none'), limit(50));
-
-          const unsubIncentives = onSnapshot(incentiveQuery, (snap) => {
-            const incs = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Incentive));
-            setIncentives(incs);
-          }, (err) => {
-            console.error("Incentives listener error:", err);
-            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
-              handleFirestoreError(err, OperationType.GET, 'incentives');
-            }
-          });
-          unsubsRef.current.push(unsubIncentives);
-
-          // Listen for Incentive Payments
-          const paymentQuery = isUserPrivileged
-            ? query(collection(db, 'incentivePayments'), limit(100))
-            : query(collection(db, 'incentivePayments'), where('employeeId', '==', employeeId || 'none'), limit(50));
-
-          const unsubIncentivePayments = onSnapshot(paymentQuery, (snap) => {
-            const pays = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as IncentivePayment));
-            setIncentivePayments(pays);
-          }, (err) => {
-            console.error("Incentive payments listener error:", err);
-            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
-              handleFirestoreError(err, OperationType.GET, 'incentivePayments');
-            }
-          });
-          unsubsRef.current.push(unsubIncentivePayments);
-
-          // Listen for Page Passwords
-          const unsubPagePasswords = onSnapshot(collection(db, 'pagePasswords'), (snap) => {
-            const passwords: Record<string, { password: string, isOpen: boolean }> = {};
-            snap.docs.forEach(doc => {
-              passwords[doc.id] = doc.data() as { password: string, isOpen: boolean };
-            });
-            setPagePasswords(passwords);
-          }, (err) => {
-            console.error("Page passwords listener error:", err);
-            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
-              handleFirestoreError(err, OperationType.GET, 'pagePasswords');
-            }
-          });
-          unsubsRef.current.push(unsubPagePasswords);
-
-          // Listen for Matrix Reports - Limit to last 14 days to save quota
-          const matrixDaysAgo = subDays(new Date(), 14).toISOString().split('T')[0];
-          const matrixQuery = query(collection(db, 'matrixReports'), where('date', '>=', matrixDaysAgo), limit(200));
-          
-          const unsubMatrix = onSnapshot(matrixQuery, (snap) => {
-            const reports = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as MatrixReport));
-            setMatrixReports(reports);
-          }, (err) => {
-            console.error("Matrix reports listener error:", err);
-            if (auth.currentUser && !err.message.includes('Quota exceeded')) {
-              setFatalError(err);
-              handleFirestoreError(err, OperationType.GET, 'matrixReports');
-            }
-          });
-          unsubsRef.current.push(unsubMatrix);
 
           if (isUserAdmin) {
             console.log("User is admin, starting admin listeners...");
@@ -2134,7 +2221,6 @@ export default function App() {
 
     const fetchAggregates = async () => {
       // If sales are fully loaded in memory, we don't need server-side aggregation
-      // because salesStats (calculated from filteredSales) will be accurate.
       if (!user || !profile || !['dashboard', 'sales'].includes(activeTab) || isSalesLoaded || isQuotaExceeded) {
         setDashboardAggregates(null);
         return;
@@ -2142,10 +2228,69 @@ export default function App() {
       
       setIsLoadingAggregates(true);
       try {
+        let level = getPermissionLevel('sales');
+        if (level === 'None') {
+          setDashboardAggregates(null);
+          setIsLoadingAggregates(false);
+          return;
+        }
+
+        // Determine scope and period to match Cloud Function IDs
+        let scope = 'global';
+        if (salesAgentFilter) {
+          scope = `agent_${salesAgentFilter}`;
+        } else if (salesBdeFilter) {
+          scope = `bde_${salesBdeFilter}`;
+        }
+
+        let type = 'lifetime';
+        let periodId = 'total';
+        if (salesWeekFilter) {
+          type = 'weekly';
+          periodId = salesWeekFilter;
+        } else if (salesMonthFilter) {
+          type = 'monthly';
+          periodId = salesMonthFilter;
+        }
+
+        const summaryId = `${type}_${scope}_${periodId}`;
+        const summaryRef = doc(db, 'salesSummaries', summaryId);
+        const summarySnap = await getDoc(summaryRef);
+
+        if (summarySnap.exists()) {
+          const data = summarySnap.data();
+          // Map summary data to the format expected by the UI
+          // Since summaries are currently global/bde/agent totals, 
+          // we might need to handle the 'Inhouse/Branch/Franchisee' split.
+          // For now, if the summary doesn't have category breakdown, we fallback or use it as 'Inhouse'
+          
+          const results: any = {
+            inhouse: { 
+              total: data.totalSalesCount || 0, 
+              value: data.totalRevenue || 0,
+              advance: data.statusCounts?.['Advance'] || 0,
+              advanceValue: data.statusValues?.['Advance'] || 0,
+              cn: data.statusCounts?.['Credit Note'] || 0,
+              cnValue: data.statusValues?.['Credit Note'] || 0,
+              confirmed: (data.statusCounts?.['Confirmed'] || 0) + (data.statusCounts?.['Done'] || 0),
+              confirmedValue: (data.statusValues?.['Confirmed'] || 0) + (data.statusValues?.['Done'] || 0),
+              cancel: data.statusCounts?.['Cancel'] || 0,
+              cancelValue: data.statusValues?.['Cancel'] || 0
+            },
+            branch: { total: 0, value: 0, advance: 0, advanceValue: 0, cn: 0, cnValue: 0, confirmed: 0, confirmedValue: 0, cancel: 0, cancelValue: 0 },
+            franchisee: { total: 0, value: 0, advance: 0, advanceValue: 0, cn: 0, cnValue: 0, confirmed: 0, confirmedValue: 0, cancel: 0, cancelValue: 0 },
+          };
+          
+          setDashboardAggregates(results);
+          setIsLoadingAggregates(false);
+          return;
+        }
+
+        // Fallback to getAggregateFromServer if summary doesn't exist
         const baseQuery = collection(db, 'sales');
         const filters: any[] = [];
         
-        const level = getPermissionLevel('sales');
+        level = getPermissionLevel('sales');
         if (level === 'Limited') {
           const salesFilters = [
             where('agentEmail', '==', user.email || ''),
@@ -2256,6 +2401,10 @@ export default function App() {
         console.error("Aggregation error:", err);
         if (err.message?.includes('Quota exceeded') || err.message?.includes('quota limit exceeded')) {
           setIsQuotaExceeded(true);
+        } else if (err.message?.includes('permissions')) {
+          setError('Dashboard data is being optimized. Please ask an Admin to run "Backfill Sales Summaries" in User Management.');
+        } else {
+          setError('Aggregation error: ' + (err.message || String(err)));
         }
       } finally {
         setIsLoadingAggregates(false);
@@ -12576,6 +12725,47 @@ export default function App() {
                 </Button>
               </div>
             </div>
+
+            <Card className="p-6 bg-zinc-900 text-white border-none shadow-xl">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-lg font-bold flex items-center gap-2">
+                    <Database className="w-5 h-5 text-orange-400" />
+                    System Maintenance
+                  </h3>
+                  <p className="text-zinc-400 text-sm mt-1">
+                    Manage server-side aggregations and database health.
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Button 
+                    variant="outline"
+                    onClick={refreshAllData}
+                    isLoading={isRefreshingStatic}
+                    className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                  >
+                    <RefreshCw className={cn("w-4 h-4 mr-2", isRefreshingStatic && "animate-spin")} />
+                    Refresh System Data
+                  </Button>
+                  <Button 
+                    onClick={async () => {
+                      if (window.confirm('Are you sure you want to backfill all sales summaries? This will scan all sales records.')) {
+                        try {
+                          await backfillSalesSummaries();
+                          alert('Backfill completed successfully!');
+                        } catch (err: any) {
+                          alert('Backfill failed: ' + err.message);
+                        }
+                      }
+                    }}
+                    className="bg-orange-600 hover:bg-orange-700 text-white border-none"
+                  >
+                    <RefreshCw className="w-4 h-4 mr-2" />
+                    Backfill Sales Summaries
+                  </Button>
+                </div>
+              </div>
+            </Card>
 
             <div className="flex items-center justify-between bg-white p-4 rounded-2xl border border-zinc-200 shadow-sm">
               <div className="flex items-center gap-4">

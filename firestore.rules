@@ -76,40 +76,33 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
+    function hasRole(role) {
+      return isAuthenticated() && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent').lower() == role.lower();
+    }
+
     function isAdmin() {
       return isAuthenticated() && (
-        (request.auth.token.email == "nsingla09@gmail.com" && request.auth.token.email_verified == true) ||
-        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent') is string &&
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent').lower() == 'admin')
+        request.auth.token.email == "nsingla09@gmail.com" ||
+        hasRole('Admin')
       );
     }
 
     function isManager() {
-      return isAuthenticated() && 
-             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent') is string &&
-             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent').lower() == 'manager';
+      return hasRole('Manager');
     }
 
     function isTrainer() {
-      return isAuthenticated() && 
-             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent') is string &&
-             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent').lower() == 'trainer';
+      return hasRole('Trainer');
     }
 
     function isBDE() {
-      return isAuthenticated() && 
-             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent') is string &&
-             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent').lower() == 'bde';
+      return hasRole('BDE');
     }
 
     function isPrivileged() {
       return isAdmin() || isManager() || isTrainer() || isBDE() || 
-             (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'Agent').lower() == 'sales agent') ||
+             hasRole('Sales Agent') ||
              hasCompletePermission('sales') || hasCompletePermission('agentOverview') ||
              hasPermission('trainingOverview') || hasPermission('issueOverview');
     }
@@ -117,7 +110,6 @@ service cloud.firestore {
     function hasCompletePermission(permission) {
       return isAdmin() || (
         isAuthenticated() && 
-        exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', {}) is map &&
         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', {})[permission] == 'Complete'
       );
@@ -125,8 +117,7 @@ service cloud.firestore {
 
     function hasPermission(permission) {
       return isAdmin() || (permission == 'trainingOverview' && (isManager() || isTrainer())) || (
-        isAuthenticated() && 
-        exists(/databases/$(database)/documents/users/$(request.auth.uid)) && (
+        isAuthenticated() && (
           (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', {}) is map &&
            permission in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', {}) &&
            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('permissions', {})[permission] in ['Limited', 'Complete']) ||
@@ -253,6 +244,16 @@ service cloud.firestore {
              (!('updatedAt' in data) || data.updatedAt is timestamp);
     }
 
+    function isValidSalesSummary(data) {
+      return data.totalRevenue is number &&
+             data.totalSalesCount is number &&
+             data.type in ['daily', 'weekly', 'monthly'] &&
+             data.scope in ['global', 'bde'] &&
+             data.scopeId is string &&
+             data.periodId is string &&
+             data.lastUpdatedAt is timestamp;
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
@@ -317,12 +318,15 @@ service cloud.firestore {
 
     match /sales/{saleId} {
       allow read: if isAuthenticated() && (
+        isAdmin() || 
         isPrivileged() || 
         resource.data.get('agentEmail', '') == request.auth.token.email ||
-        resource.data.get('agent', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('displayName', '') ||
-        resource.data.get('agent', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('employeeName', '') ||
-        resource.data.get('bde', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('displayName', '') ||
-        resource.data.get('associateBde', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('displayName', '')
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && (
+          resource.data.get('agent', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('displayName', '') ||
+          resource.data.get('agent', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('employeeName', '') ||
+          resource.data.get('bde', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('displayName', '') ||
+          resource.data.get('associateBde', '') == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('displayName', '')
+        ))
       );
       allow create: if isAuthenticated() && (
         isPrivileged() || 
@@ -380,6 +384,11 @@ service cloud.firestore {
          get(/databases/$(database)/documents/employees/$(request.resource.data.employeeId)).data.get('email', '') == request.auth.token.email)
       );
       allow delete: if isAdmin();
+    }
+
+    match /salesSummaries/{summaryId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
     }
 
     match /test/connection {
